@@ -22,7 +22,7 @@ METHOD_INFO = {
     "eagle3": dict(title="EAGLE-3 draft head", speedup="2–3.5× at low batch",
                    pros=["Largest single-stream speed-up of any lossless method", "Tiny extra weights (a single decoder layer) on top of the target model"],
                    cons=["Needs a head trained for exactly this model (and chat template)", "Gain shrinks as batch size / concurrency grows"]),
-    "ngram": dict(title="N-gram / prompt-lookup", speedup="1.0–2.5× (workload dependent)",
+    "ngram": dict(title="N-gram / prompt-lookup", speedup="1.0–2.5×",
                   pros=["Zero extra weights, works with every model, trivial to enable", "Excellent on code edits, RAG, summarisation, JSON — anything that copies from the prompt"],
                   cons=["Little or no gain on free-form generation", "Can slightly slow down open-ended chat when drafts are rarely accepted"]),
     "draft_model": dict(title="Small draft model", speedup="1.5–2.5×",
@@ -81,7 +81,7 @@ def rank_methods(model: dict[str, Any], copy_ratios: dict[str, float]) -> list[d
             conf = 90 if sp.get("verified", True) else 82
             cands.append((conf, "eagle3", sp, "A trained EAGLE-3 head exists for this model; it gives the biggest low-batch speed-up of any lossless method."))
         elif m == "draft_model":
-            cands.append((60, "draft_model", sp, f"{sp['repo']} shares this model's tokenizer and can draft for it."))
+            cands.append((50, "draft_model", sp, f"{sp['repo']} shares this model's tokenizer and can draft for it. Engine support is the catch — verify your vLLM version supports draft models, or use SGLang."))
         elif m == "ngram":
             score = 55 + 60 * max(avg_copy, code_copy * 0.8)
             why = (f"No extra weights needed. Your outputs reuse {avg_copy:.0%} of their phrasing from the prompt on average"
@@ -92,7 +92,7 @@ def rank_methods(model: dict[str, Any], copy_ratios: dict[str, float]) -> list[d
     for i, (score, method, entry, why) in enumerate(cands):
         info = METHOD_INFO[method]
         out.append({
-            "method": method, "title": info["title"], "fit": "best" if i == 0 else ("good" if score >= 60 else "ok"),
+            "method": method, "title": info["title"], "fit": "best" if i == 0 else ("good" if score >= 58 else "ok"),
             "expected_speedup": info["speedup"], "why": why, "pros": info["pros"], "cons": info["cons"],
             "repo": (entry or {}).get("repo"), "verified": (entry or {}).get("verified", True),
             "note": (entry or {}).get("note"),
@@ -164,7 +164,7 @@ def speculative_plan(model: dict[str, Any], info: dict[str, Any], spec: dict[str
                        "Look for a speculative-decoding line in the startup log, then watch the acceptance counters while sending traffic. Healthy acceptance is ≥ 50% for EAGLE-3/MTP and varies widely for n-gram.",
                        "curl -s localhost:8000/metrics | grep spec_decode", "bash"))
         s.append(_step("Measure the gain on this platform",
-                       "Use **Re-run with this config** below (or pick the speculative mode in the options before selecting the model). The platform boots the same model with speculation enabled, re-runs the full suite and diffs decode tok/s and quality against this run. Keep it only if tok/s improves ≥ 1.3× and the coherency score does not fall.", None))
+                       "Click “Try it now” on the method card above (or choose the speculative mode in the run options before selecting a model). The platform boots the same model with speculation enabled, re-runs the full suite and diffs decode tok/s and quality against this run. Keep it only if tok/s improves ≥ 1.3× and the coherency score does not fall.", None))
         s.append(_step("Tune num_speculative_tokens",
                        {"ngram": "Start at 5 and try 3–8; also tune prompt_lookup_max (3–6).",
                         "eagle3": "Start at 3 and try 2–5; deeper trees help at batch 1 but hurt at high load.",

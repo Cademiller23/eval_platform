@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 import random
 import re
 from typing import Any, AsyncIterator
@@ -30,6 +31,31 @@ KEYWORD_FLAWS = {"broken": ["garble", "leak"], "garble": ["garble"], "loop": ["r
 SPEC_ACCEPT = {"ngram": 1.55, "eagle3": 2.7, "eagle": 2.3, "mtp": 1.85, "draft_model": 2.2, "custom": 2.0}
 DOMAIN_NGRAM = {"coding": 2.4, "general": 1.5, "math": 1.35, "coherency": 1.6}
 
+BENCH_SENTENCES = [
+    "Language models begin by splitting text into tokens, which are small pieces of words that the network can embed as vectors.",
+    "Each layer of the transformer lets every token look at the tokens before it and decide which ones are most relevant.",
+    "During training the network repeatedly predicts the next token and is nudged toward the correct answer by gradient descent.",
+    "At inference time the model produces a probability distribution over the vocabulary and one token is selected from it.",
+    "Greedy decoding always picks the most likely token, while sampling introduces controlled randomness for more varied prose.",
+    "A key-value cache stores intermediate results so that earlier tokens do not need to be recomputed at every step.",
+    "Memory bandwidth, not raw compute, usually limits how quickly a large model can generate text for a single user.",
+    "Batching several requests together amortises the cost of reading the weights and raises overall throughput on the GPU.",
+    "Quantisation shrinks the weights to fewer bits, which reduces memory traffic at a small cost in numerical precision.",
+    "Speculative decoding drafts several tokens cheaply and then verifies them in one pass of the larger target model.",
+    "Instruction tuning teaches the model to follow directions, while preference optimisation shapes its tone and refusals.",
+    "Long contexts are expensive because attention grows with the number of tokens and the cache grows linearly with length.",
+    "Engineers evaluate such systems on accuracy, latency, cost and the coherence of what comes out of them under load.",
+    "A harbour at dawn smells of salt and diesel, and the first boats slide out while gulls argue over the leftover bait.",
+    "The lighthouse keeper wound the clock each evening, a habit his father had taught him long before the lamp was automated.",
+    "Printing presses spread pamphlets, scientific tables and heated arguments across Europe faster than any scribe could copy them.",
+    "Rivers carve valleys slowly, patiently moving sediment downstream until a delta fans out into the waiting sea.",
+    "A good map leaves things out on purpose, trading detail for the clarity that lets a traveller choose a route.",
+    "In winter the orchard is quiet, the bare branches holding nothing but frost and the memory of last summer's fruit.",
+    "Trade winds once decided which ports grew rich, because sailors planned entire voyages around their steady push.",
+    "The old library kept its rarest volumes in a cool room where the light was dim and the air was carefully dried.",
+    "Bridges teach engineers humility, since traffic, wind and time all test assumptions that looked safe on paper.",
+]
+
 FLUFF_SENTENCES = [
     "Let me think about this carefully before committing to an answer.",
     "First I should restate the problem and identify exactly what is being asked.",
@@ -44,6 +70,13 @@ FLUFF_SENTENCES = [
     "One more sanity check on the units and the sign of the result.",
     "Good, nothing contradicts the earlier reasoning, so I can answer.",
 ]
+
+
+# Wall-clock pause per streamed chunk (EVAL_MOCK_PACE). Event timing is virtual; this only paces the UI demo.
+def _pace() -> float:
+    return float(os.environ.get("EVAL_MOCK_PACE", "0.004"))
+
+
 
 
 def _u(*parts: str) -> float:
@@ -98,7 +131,7 @@ class MockSession(Session):
         forced = None
 
         if self.model.get("reasoning") or "think" in self._flaws:
-            n = 450 if ("think" in self._flaws and _u(self.model["id"], task.id, "think") < 0.35) else 90
+            n = 4500 if ("think" in self._flaws and _u(self.model["id"], task.id, "think") < 0.35) else 90
             body = " ".join(FLUFF_SENTENCES[i % len(FLUFF_SENTENCES)] + (f" (step {i // len(FLUFF_SENTENCES) + 1})" if i >= len(FLUFF_SENTENCES) else "") for i in range(max(4, n // 12)))
             text = f"<think>\n{body}\n</think>\n\n{text}"
 
@@ -157,9 +190,11 @@ class MockSession(Session):
         seed = f"{(meta or {}).get('seed', '')}"
         if task is not None:
             text, forced = self._answer(task, seed + str(temperature))
-        else:  # synthetic benchmark prompts: long, coherent filler
-            sentence = "Modern language models predict the next token by attending over everything that came before. "
-            text, forced = (sentence + "They are trained on vast corpora and fine-tuned to follow instructions. ") * 60, None
+        else:  # synthetic benchmark prompts: long, varied, coherent filler
+            r0 = random.Random(f"bench|{self.model['id']}|{seed}")
+            pool = BENCH_SENTENCES[:]
+            r0.shuffle(pool)
+            text, forced = " ".join(pool + [x.replace("the", "this", 1) for x in pool[:6]]), None
         pieces = _tokens(text)
         rng = random.Random(f"{self.model['id']}|{seed}|{len(pieces)}|{prompt_chars}")
         finish = forced or "stop"
@@ -197,7 +232,7 @@ class MockSession(Session):
                 t += step_s
             self._counters["gen_tokens"] += n
             yield {"t": t, "text": chunk, "n": n, "lp": lps}
-            await asyncio.sleep(0.0004)
+            await asyncio.sleep(_pace())
         yield {"done": True, "finish_reason": finish, "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": total}, "total_t": t}
 
     async def metrics(self) -> str | None:

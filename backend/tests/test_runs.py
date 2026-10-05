@@ -97,3 +97,17 @@ def test_api_end_to_end():
         assert "data:" in c.get(f"/api/runs/{rid}/events").text
         assert c.delete(f"/api/runs/{rid}").status_code == 200
         assert c.get(f"/api/runs/{rid}").status_code == 404
+
+
+def test_dotenv_loader(tmp_path, monkeypatch):
+    from evalplatform.config import load_dotenv_file
+
+    f = tmp_path / ".env"
+    f.write_text("# comment\nHF_TOKEN='abc123'\nEMPTY=\nKEEP=fromfile\n")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setenv("KEEP", "fromenv")
+    load_dotenv_file(f)
+    import os
+
+    assert os.environ["HF_TOKEN"] == "abc123" and os.environ["KEEP"] == "fromenv"
+    monkeypatch.delenv("HF_TOKEN", raising=False)

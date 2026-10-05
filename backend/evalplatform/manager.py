@@ -104,6 +104,10 @@ class RunManager:
     async def _execute(self, h: RunHandle) -> None:
         h.status, h.started_at = "running", now_iso()
         h.emit({"type": "status", "status": "running"})
+        try:
+            h.persist()
+        except Exception:  # pragma: no cover
+            pass
         runner = Runner(h.id, h.options, h.emit)
         try:
             h.report = await runner.run()

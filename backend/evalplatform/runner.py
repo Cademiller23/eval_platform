@@ -150,7 +150,7 @@ class Runner:
     def _max_tokens(self, task: Task, prompt_chars: int) -> int:
         mt = task.max_tokens
         if self.model.get("reasoning"):
-            mt = mt * 6
+            mt = max(mt * 6, 3072)  # reasoning models think at length even for trivial prompts
         ctx = int(self.session.info.get("max_model_len") or self.options.get("max_model_len") or 8192) if self.session else 8192
         room = ctx - int(prompt_chars / 3.2) - 64
         return max(32, min(mt, room))
@@ -257,6 +257,7 @@ class Runner:
         pid = "performance"
         self.phase(pid, "running", "decode throughput · TTFT · concurrency")
         decode_runs: list[float] = []
+        bench_samples: list[ChatResult] = []
         ttfts: list[float] = []
         tokens_total = 0
         n_total = len(BENCH_PROMPTS) * 2 + 3
@@ -270,6 +271,8 @@ class Runner:
                     self.log("warn", f"benchmark request failed: {r.error}")
                     continue
                 self._absorb_behaviour(r)
+                if rep == 0:
+                    bench_samples.append(r)
                 tokens_total += r.completion_tokens
                 if r.decode_tps:
                     decode_runs.append(r.decode_tps)
@@ -318,7 +321,29 @@ class Runner:
         if roof and self.perf["decode_tps_median"]:
             self.perf["roofline"] = {"theoretical_tps": round(roof, 1), "efficiency": round(self.perf["decode_tps_median"] / roof, 3), "gpu": gpu_key, "gpu_count": gpu_n}
         self._emit({"type": "perf", "perf": self.perf})
+        # Long greedy generations are the best degeneration probe: grade them as coherency tests too.
+        for i, r in enumerate(bench_samples):
+            res = self._bench_test(i, r)
+            self.tests.append(res)
+            self._emit({"type": "test", "test": res})
         self.phase(pid, "done", f"{self.perf['decode_tps_median'] or 0:.0f} tok/s · TTFT {self.perf['ttft_ms_p50'] or 0:.0f} ms")
+
+    def _bench_test(self, i: int, r: ChatResult) -> dict[str, Any]:
+        # finish_reason is deliberately ignored: these runs are capped at 256 tokens on purpose
+        health = analyze_text(r.text, kind="prose", logprobs=r.logprobs, temperature=0.0)
+        clean = not health.severe
+        return {
+            "id": f"coh-longgen-{i + 1}", "domain": "coherency", "name": f"Open-ended greedy generation #{i + 1}",
+            "difficulty": "medium", "skill": "degeneration probe", "prompt": _truncate(BENCH_PROMPTS[i % len(BENCH_PROMPTS)], 600),
+            "passed": clean, "score": round(1.0 - health.severity_score, 3) if not clean else 1.0,
+            "checks": [{"name": "no garbling, loops or leaked tokens over ~256 tokens", "passed": clean,
+                        "detail": "; ".join(x.detail for x in health.issues if x.severity != "minor")[:240]}],
+            "response": _truncate(r.text, 6000), "thinking_chars": 0, "health": health.as_dict(),
+            "copy_ratio": None,
+            "metrics": {"ttft_ms": round(r.ttft_s * 1000, 1) if r.ttft_s is not None else None,
+                        "decode_tps": round(r.decode_tps, 1) if r.decode_tps else None, "tokens": r.completion_tokens,
+                        "prompt_tokens": r.prompt_tokens, "duration_ms": round(r.total_s * 1000, 1), "finish_reason": r.finish_reason},
+        }
 
     def _absorb_behaviour(self, r: ChatResult) -> None:
         ch = r.chunks[1:] if len(r.chunks) > 1 else []
@@ -347,7 +372,8 @@ class Runner:
             self._emit({"type": "test", "test": res})
 
         await asyncio.gather(*[one(t) for t in tasks])
-        ok = [t for t in self.tests if t["domain"] == domain and not t.get("error")]
+        ids = {t.id for t in tasks}
+        ok = [t for t in self.tests if t["id"] in ids and not t.get("error")]
         passed = sum(1 for t in ok if t["passed"])
         self.phase(domain, "done", f"{passed}/{len(tasks)} passed")
         self.log("info", f"{title}: {passed}/{len(tasks)} passed.")

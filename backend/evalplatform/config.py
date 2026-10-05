@@ -7,10 +7,31 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def load_dotenv_file(path: Path | str = ".env") -> None:
+    """Minimal .env loader so HF_TOKEN / MODAL_TOKEN_* work without extra dependencies.
+
+    Real environment variables always win over the file.
+    """
+    p = Path(path)
+    if not p.is_file():
+        return
+    for raw in p.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key, val = key.strip(), val.strip().strip("'\"")
+        if key and val and key not in os.environ:
+            os.environ[key] = val
+
+
+load_dotenv_file()
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EVAL_", env_file=".env", extra="ignore")
 
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"   # no auth: only expose on a network you trust (EVAL_HOST=0.0.0.0)
     port: int = 8000
     data_dir: Path = Path("./data")
     modal_app: str = "coherence-eval-serving"

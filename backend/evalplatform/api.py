@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -60,7 +61,11 @@ def default_provider() -> str:
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Model Evaluation Platform", version=__version__)
-    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+    # The UI is served from the same origin, so CORS stays off by default — an open policy would let any
+    # website you visit start GPU runs on your Modal account. Opt in explicitly for a separate frontend.
+    origins = [o.strip() for o in os.environ.get("EVAL_CORS_ORIGINS", "").split(",") if o.strip()]
+    if origins:
+        app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["*"], allow_headers=["*"])
     manager = RunManager()
     app.state.manager = manager
 

@@ -165,8 +165,12 @@ class ModelServer:
     @modal.method()
     def info(self) -> dict:
         import httpx
-        from importlib.metadata import version
+        from importlib.metadata import PackageNotFoundError, version
 
+        try:
+            engine_version = version("vllm")
+        except PackageNotFoundError:
+            engine_version = "unknown"
         served_len = None
         try:
             data = httpx.get(f"http://127.0.0.1:{VLLM_PORT}/v1/models", timeout=10).json()["data"][0]
@@ -177,7 +181,7 @@ class ModelServer:
         return {
             "provider": "modal",
             "engine": "vLLM",
-            "engine_version": version("vllm"),
+            "engine_version": engine_version,
             "served_model": SERVED_NAME,
             "model": self.model,
             "gpu_names": self._gpus,
@@ -218,45 +222,52 @@ class ModelServer:
         usage = None
         finish = None
         try:
-            with httpx.stream("POST", f"http://127.0.0.1:{VLLM_PORT}/v1/chat/completions", json=body, timeout=600) as r:
-                if r.status_code >= 400:
-                    r.read()
-                    yield {"error": f"HTTP {r.status_code}: {r.text[:500]}"}
-                    return
-                for line in r.iter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    payload_s = line[5:].strip()
-                    if payload_s == "[DONE]":
-                        break
-                    obj = json.loads(payload_s)
-                    if obj.get("usage"):
-                        usage = obj["usage"]
-                    choices = obj.get("choices") or []
-                    if not choices:
-                        continue
-                    ch = choices[0]
-                    delta = ch.get("delta") or {}
-                    text = delta.get("content") or ""
-                    reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
-                    if reasoning:
-                        text = reasoning + text
-                    n = 0
-                    if usage and usage.get("completion_tokens") is not None:
-                        total = int(usage["completion_tokens"])
-                        n = max(0, total - seen)
-                        seen = total
-                    elif text:
-                        n = 1
-                    lp = [
-                        float(i["logprob"])
-                        for i in ((ch.get("logprobs") or {}).get("content") or [])
-                        if i.get("logprob") is not None
-                    ]
-                    if text or n or lp:
-                        yield {"t": time.perf_counter() - t0, "text": text, "n": n or (1 if text else 0), "lp": lp}
-                    if ch.get("finish_reason"):
-                        finish = ch["finish_reason"]
+            for attempt in range(2):
+                with httpx.stream("POST", f"http://127.0.0.1:{VLLM_PORT}/v1/chat/completions", json=body, timeout=600) as r:
+                    if r.status_code >= 400:
+                        r.read()
+                        # Some vLLM builds reject logprobs together with speculative decoding.
+                        # Logprobs are only an optional health signal, so retry without them.
+                        if attempt == 0 and body.get("logprobs") and "logprob" in r.text.lower():
+                            body.pop("logprobs", None)
+                            continue
+                        yield {"error": f"HTTP {r.status_code}: {r.text[:500]}"}
+                        return
+                    for line in r.iter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        payload_s = line[5:].strip()
+                        if payload_s == "[DONE]":
+                            break
+                        obj = json.loads(payload_s)
+                        if obj.get("usage"):
+                            usage = obj["usage"]
+                        choices = obj.get("choices") or []
+                        if not choices:
+                            continue
+                        ch = choices[0]
+                        delta = ch.get("delta") or {}
+                        text = delta.get("content") or ""
+                        reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                        if reasoning:
+                            text = reasoning + text
+                        n = 0
+                        if usage and usage.get("completion_tokens") is not None:
+                            total = int(usage["completion_tokens"])
+                            n = max(0, total - seen)
+                            seen = total
+                        elif text:
+                            n = 1
+                        lp = [
+                            float(i["logprob"])
+                            for i in ((ch.get("logprobs") or {}).get("content") or [])
+                            if i.get("logprob") is not None
+                        ]
+                        if text or n or lp:
+                            yield {"t": time.perf_counter() - t0, "text": text, "n": n or (1 if text else 0), "lp": lp}
+                        if ch.get("finish_reason"):
+                            finish = ch["finish_reason"]
+                break
         except Exception as e:
             yield {"error": f"{type(e).__name__}: {e}"}
             return
