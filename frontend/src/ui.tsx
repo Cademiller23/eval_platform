@@ -1,20 +1,33 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 
-export const scoreColor = (s: number) => (s >= 80 ? "var(--green)" : s >= 60 ? "var(--cyan)" : s >= 45 ? "var(--amber)" : "var(--red)");
+/** Score → system colour (large type and fills, so the bright system hues are fine here). */
+export const scoreColor = (s: number) => (s >= 80 ? "var(--green)" : s >= 60 ? "var(--accent)" : s >= 45 ? "var(--orange)" : "var(--red)");
 
 export const fmt = (v: number | null | undefined, d = 1, suffix = "") => (v == null || Number.isNaN(v) ? "—" : `${v.toFixed(d)}${suffix}`);
 export const pct = (v: number | null | undefined, d = 0) => (v == null ? "—" : `${(v * 100).toFixed(d)}%`);
 
-const FAMILY_COLORS: Record<string, string> = {
-  Llama: "#60a5fa", Qwen: "#a78bfa", Mistral: "#fb923c", Gemma: "#34d399", Phi: "#22d3ee", DeepSeek: "#818cf8", GLM: "#f472b6", SmolLM: "#fbbf24",
+// App-icon style gradients for model families / vendors (light → deep, like squircle icons on iOS)
+const FAMILY_GRADIENTS: Record<string, [string, string]> = {
+  Llama: ["#4facfe", "#0a64e0"], Qwen: ["#b48dff", "#6a3de8"], Mistral: ["#ffb347", "#ff6a00"], Gemma: ["#5de0a0", "#16a34a"],
+  Phi: ["#5ee7ff", "#0a8fb0"], DeepSeek: ["#8e9bff", "#4a49d8"], GLM: ["#ff8cc6", "#d6246e"], SmolLM: ["#ffd75e", "#f59e0b"],
+  Replay: ["#7ee8c0", "#12a37a"], Recorded: ["#7ee8c0", "#12a37a"],
 };
-export const familyColor = (f: string) => FAMILY_COLORS[f] ?? "#94a3b8";
+const PALETTE: [string, string][] = [["#4facfe", "#0a64e0"], ["#b48dff", "#6a3de8"], ["#ffb347", "#ff6a00"], ["#5de0a0", "#16a34a"], ["#5ee7ff", "#0a8fb0"], ["#8e9bff", "#4a49d8"], ["#ff8cc6", "#d6246e"], ["#ffd75e", "#f59e0b"], ["#ff8a80", "#e53935"], ["#9ad66b", "#4c9a1f"]];
+const gradient = ([a, b]: [string, string]) => `linear-gradient(145deg, ${a}, ${b})`;
+export function hashGradient(seed: string): string {
+  let h = 0;
+  for (const c of seed) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return gradient(PALETTE[h % PALETTE.length]);
+}
+export const familyColor = (f: string) => (FAMILY_GRADIENTS[f] ? gradient(FAMILY_GRADIENTS[f]) : hashGradient(f));
 
-type IconName = "check" | "x" | "chev" | "search" | "bolt" | "code" | "calc" | "chat" | "shield" | "gauge" | "gear" | "download" | "refresh" | "spark" | "clock" | "cpu" | "trash" | "stop" | "copy" | "arrow" | "flask" | "history" | "layers" | "sun" | "moon" | "key" | "compare" | "alert";
+type IconName = "check" | "x" | "chev" | "chevr" | "search" | "bolt" | "code" | "calc" | "chat" | "shield" | "gauge" | "gear" | "download" | "refresh" | "spark" | "clock" | "cpu" | "trash" | "stop" | "copy" | "arrow" | "flask" | "history" | "layers" | "sun" | "moon" | "key" | "compare" | "alert" | "plus";
 const PATHS: Record<IconName, ReactNode> = {
   check: <path d="M5 12.5l4.5 4.5L19 7" />,
   x: <path d="M6 6l12 12M18 6L6 18" />,
   chev: <path d="M6 9l6 6 6-6" />,
+  chevr: <path d="M9 5l7 7-7 7" />,
+  plus: <path d="M12 5v14M5 12h14" />,
   search: <><circle cx="11" cy="11" r="6.5" /><path d="M20 20l-4-4" /></>,
   bolt: <path d="M13 3L5 13.5h6L10 21l8-10.5h-6L13 3z" />,
   code: <path d="M8 8l-5 4 5 4M16 8l5 4-5 4M14 5l-4 14" />,
@@ -41,32 +54,35 @@ const PATHS: Record<IconName, ReactNode> = {
   compare: <path d="M7 4v16M17 4v16M3 8h8M13 16h8M3 12h8M13 12h8" />,
   alert: <><path d="M12 3.5l9.5 16.5h-19L12 3.5z" /><path d="M12 10v4.5M12 17.5v.01" /></>,
 };
-export function Icon({ name, size = 18, stroke = 1.9 }: { name: IconName; size?: number; stroke?: number }) {
+export type { IconName };
+export function Icon({ name, size = 18, stroke = 1.75 }: { name: IconName; size?: number; stroke?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round" aria-hidden focusable="false">
       {PATHS[name]}
     </svg>
   );
 }
 
+/** Activity-ring style score: thick rounded arc over a tinted track, number in SF Rounded. */
 export function ScoreRing({ value, grade, size = 200 }: { value: number; grade?: string; size?: number }) {
-  const r = size / 2 - 14;
+  const stroke = Math.round(size * 0.078);
+  const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
   const col = scoreColor(value);
+  const target = Math.max(0, Math.min(100, value)) / 100;
+  const [p, setP] = useState(0);
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setP(target));
+    return () => cancelAnimationFrame(id);
+  }, [target]);
   return (
-    <div className="ring-wrap" style={{ width: size, height: size }}>
+    <div className="ring-wrap" style={{ width: size, height: size }} role="img" aria-label={`Overall score ${Math.round(value)} out of 100${grade ? `, grade ${grade}` : ""}`}>
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-        <defs>
-          <linearGradient id="ringg" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stopColor={col} />
-            <stop offset="1" stopColor="var(--violet)" />
-          </linearGradient>
-        </defs>
-        <circle cx={size / 2} cy={size / 2} r={r} fill="none" style={{ stroke: "var(--track)" }} strokeWidth="12" />
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" strokeWidth={stroke} style={{ stroke: col, opacity: 0.16 }} />
         <circle
-          cx={size / 2} cy={size / 2} r={r} fill="none" stroke="url(#ringg)" strokeWidth="12" strokeLinecap="round"
-          strokeDasharray={`${(c * Math.max(0, Math.min(100, value))) / 100} ${c}`} transform={`rotate(-90 ${size / 2} ${size / 2})`}
-          style={{ transition: "stroke-dasharray 1s cubic-bezier(.2,.8,.2,1)", filter: `drop-shadow(0 0 10px ${col})` }}
+          cx={size / 2} cy={size / 2} r={r} fill="none" strokeWidth={stroke} strokeLinecap="round"
+          strokeDasharray={`${c * p} ${c}`} transform={`rotate(-90 ${size / 2} ${size / 2})`}
+          style={{ stroke: col, transition: "stroke-dasharray 1.1s var(--ease)" }}
         />
       </svg>
       <div className="ring-center">
@@ -79,8 +95,10 @@ export function ScoreRing({ value, grade, size = 200 }: { value: number; grade?:
   );
 }
 
+const axisText: CSSProperties = { fill: "var(--text-2)" };
+
 export function Radar({ axes, size = 300 }: { axes: { label: string; value: number }[]; size?: number }) {
-  const cx = size / 2, cy = size / 2, R = size / 2 - 52;
+  const cx = size / 2, cy = size / 2, R = size / 2 - 54;
   const n = axes.length;
   const pt = (i: number, v: number): [number, number] => {
     const a = (Math.PI * 2 * i) / n - Math.PI / 2;
@@ -88,29 +106,23 @@ export function Radar({ axes, size = 300 }: { axes: { label: string; value: numb
   };
   const poly = axes.map((a, i) => pt(i, a.value).join(",")).join(" ");
   return (
-    <svg viewBox={`0 0 ${size} ${size}`} width="100%" style={{ maxWidth: size }}>
-      <defs>
-        <linearGradient id="radg" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#8b5cf6" stopOpacity="0.55" />
-          <stop offset="1" stopColor="#22d3ee" stopOpacity="0.45" />
-        </linearGradient>
-      </defs>
+    <svg viewBox={`0 0 ${size} ${size}`} width="100%" style={{ maxWidth: size }} role="img" aria-label={`Radar chart: ${axes.map((a) => `${a.label} ${Math.round(a.value)}`).join(", ")}`}>
       {[25, 50, 75, 100].map((g) => (
-        <polygon key={g} points={axes.map((_, i) => pt(i, g).join(",")).join(" ")} fill="none" style={{ stroke: "var(--grid)" }} />
+        <polygon key={g} points={axes.map((_, i) => pt(i, g).join(",")).join(" ")} fill="none" style={{ stroke: "var(--sep)" }} strokeWidth="1" />
       ))}
       {axes.map((_, i) => {
         const [x, y] = pt(i, 100);
-        return <line key={i} x1={cx} y1={cy} x2={x} y2={y} style={{ stroke: "var(--grid)" }} />;
+        return <line key={i} x1={cx} y1={cy} x2={x} y2={y} style={{ stroke: "var(--sep)" }} strokeWidth="1" />;
       })}
-      <polygon points={poly} fill="url(#radg)" stroke="#a78bfa" strokeWidth="2" strokeLinejoin="round" />
+      <polygon points={poly} style={{ fill: "var(--accent)", fillOpacity: 0.16, stroke: "var(--accent)" }} strokeWidth="2" strokeLinejoin="round" />
       {axes.map((a, i) => {
         const [x, y] = pt(i, a.value);
-        const [lx, ly] = pt(i, 128);
+        const [lx, ly] = pt(i, 130);
         return (
           <g key={a.label}>
-            <circle cx={x} cy={y} r="4" fill={scoreColor(a.value)} style={{ stroke: "var(--bg)" }} strokeWidth="2" />
-            <text x={lx} y={ly} style={{ fill: "var(--text)" }} fontSize="12" fontWeight="600" textAnchor="middle" dominantBaseline="middle">{a.label}</text>
-            <text x={lx} y={ly + 14} fill={scoreColor(a.value)} fontSize="12" fontWeight="700" textAnchor="middle" dominantBaseline="middle">{Math.round(a.value)}</text>
+            <circle cx={x} cy={y} r="4.5" style={{ fill: scoreColor(a.value), stroke: "var(--surface)" }} strokeWidth="2" />
+            <text x={lx} y={ly} style={axisText} fontSize="12" fontWeight="500" textAnchor="middle" dominantBaseline="middle">{a.label}</text>
+            <text x={lx} y={ly + 15} style={{ fill: scoreColor(a.value) }} fontSize="13" fontWeight="700" textAnchor="middle" dominantBaseline="middle">{Math.round(a.value)}</text>
           </g>
         );
       })}
@@ -121,7 +133,7 @@ export function Radar({ axes, size = 300 }: { axes: { label: string; value: numb
 export function Bar({ value, color, max = 100 }: { value: number; color?: string; max?: number }) {
   const w = Math.max(0, Math.min(100, (value / max) * 100));
   return (
-    <div className="bar">
+    <div className="bar" role="presentation">
       <i style={{ width: `${w}%`, background: color ?? scoreColor(value) }} />
     </div>
   );
@@ -130,18 +142,20 @@ export function Bar({ value, color, max = 100 }: { value: number; color?: string
 export function Sparkline({ values, height = 56, width = 300 }: { values: number[]; height?: number; width?: number }) {
   if (values.length < 2) return <div style={{ height }} />;
   const max = Math.max(...values) * 1.1 || 1;
-  const pts = values.map((v, i) => [(i / (values.length - 1)) * width, height - (v / max) * (height - 4) - 2]);
+  const pts = values.map((v, i) => [(i / (values.length - 1)) * width, height - (v / max) * (height - 6) - 3]);
   const d = pts.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
+  const last = pts[pts.length - 1];
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} width="100%" height={height} preserveAspectRatio="none">
+    <svg viewBox={`0 0 ${width} ${height}`} width="100%" height={height} preserveAspectRatio="none" aria-hidden>
       <defs>
         <linearGradient id="spk" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stopColor="#8b5cf6" stopOpacity="0.35" />
-          <stop offset="1" stopColor="#8b5cf6" stopOpacity="0" />
+          <stop offset="0" style={{ stopColor: "var(--accent)", stopOpacity: 0.28 }} />
+          <stop offset="1" style={{ stopColor: "var(--accent)", stopOpacity: 0 }} />
         </linearGradient>
       </defs>
       <path d={`${d} L${width},${height} L0,${height} Z`} fill="url(#spk)" />
-      <path d={d} fill="none" stroke="#a78bfa" strokeWidth="2.2" strokeLinejoin="round" vectorEffect="non-scaling-stroke" strokeLinecap="round" />
+      <path d={d} fill="none" style={{ stroke: "var(--accent)" }} strokeWidth="2.2" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+      <circle cx={last[0]} cy={last[1]} r="3.5" style={{ fill: "var(--accent)" }} vectorEffect="non-scaling-stroke" />
     </svg>
   );
 }
@@ -156,7 +170,7 @@ export function CodeBlock({ code, lang }: { code: string; lang?: string | null }
           navigator.clipboard?.writeText(code).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1400); }).catch(() => {});
         }}
       >
-        {copied ? "Copied ✓" : "Copy"}
+        {copied ? "Copied" : "Copy"}
       </button>
       <pre>{code}</pre>
     </div>
@@ -176,9 +190,29 @@ export function timeAgo(iso: string | null): string {
   if (!iso) return "";
   const s = (Date.now() - new Date(iso).getTime()) / 1000;
   if (s < 60) return "just now";
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  return `${Math.floor(s / 86400)} d ago`;
+}
+
+/** iOS segmented control with a sliding thumb. */
+export function Segmented<T extends string>({ options, value, onChange, label }: { options: { id: T; label: ReactNode; title?: string }[]; value: T; onChange: (v: T) => void; label: string }) {
+  const idx = Math.max(0, options.findIndex((o) => o.id === value));
+  return (
+    <div className="seg" role="radiogroup" aria-label={label} style={{ ["--n" as string]: options.length, ["--i" as string]: idx } as CSSProperties}>
+      <span className="thumb" aria-hidden />
+      {options.map((o) => (
+        <button key={o.id} type="button" role="radio" aria-checked={o.id === value} className={o.id === value ? "on" : ""} title={o.title} onClick={() => onChange(o.id)}>
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** iOS switch. */
+export function Switch({ on, onChange, label }: { on: boolean; onChange: (v: boolean) => void; label: string }) {
+  return <button type="button" role="switch" aria-checked={on} aria-label={label} className={`switch ${on ? "on" : ""}`} onClick={() => onChange(!on)} />;
 }
 
 export interface RadarSeries { label: string; color: string; values: number[] }
@@ -192,25 +226,25 @@ export function MultiRadar({ axes, series, size = 340 }: { axes: string[]; serie
   };
   return (
     <svg viewBox={`0 0 ${size} ${size}`} width="100%" style={{ maxWidth: size }} role="img" aria-label="Radar chart comparing models">
-      {[25, 50, 75, 100].map((g) => <polygon key={g} points={axes.map((_, i) => pt(i, g).join(",")).join(" ")} fill="none" stroke="var(--border)" />)}
+      {[25, 50, 75, 100].map((g) => <polygon key={g} points={axes.map((_, i) => pt(i, g).join(",")).join(" ")} fill="none" style={{ stroke: "var(--sep)" }} />)}
       {axes.map((a, i) => {
         const [x, y] = pt(i, 100);
-        const [lx, ly] = pt(i, 122);
+        const [lx, ly] = pt(i, 123);
         return (
           <g key={a}>
-            <line x1={cx} y1={cy} x2={x} y2={y} stroke="var(--border)" />
-            <text x={lx} y={ly} fill="var(--muted)" fontSize="12" fontWeight="600" textAnchor="middle" dominantBaseline="middle">{a}</text>
+            <line x1={cx} y1={cy} x2={x} y2={y} style={{ stroke: "var(--sep)" }} />
+            <text x={lx} y={ly} style={axisText} fontSize="12" fontWeight="500" textAnchor="middle" dominantBaseline="middle">{a}</text>
           </g>
         );
       })}
       {series.map((s) => (
         <g key={s.label}>
-          <polygon points={s.values.map((v, i) => pt(i, v).join(",")).join(" ")} fill={s.color} fillOpacity="0.14" stroke={s.color} strokeWidth="2" strokeLinejoin="round" />
-          {s.values.map((v, i) => { const [x, y] = pt(i, v); return <circle key={i} cx={x} cy={y} r="3.2" fill={s.color} />; })}
+          <polygon points={s.values.map((v, i) => pt(i, v).join(",")).join(" ")} style={{ fill: s.color, fillOpacity: 0.12, stroke: s.color }} strokeWidth="2" strokeLinejoin="round" />
+          {s.values.map((v, i) => { const [x, y] = pt(i, v); return <circle key={i} cx={x} cy={y} r="3.4" style={{ fill: s.color, stroke: "var(--surface)" }} strokeWidth="1.5" />; })}
         </g>
       ))}
     </svg>
   );
 }
 
-export const SERIES_COLORS = ["#8b5cf6", "#22d3ee", "#fbbf24", "#f472b6", "#34d399"];
+export const SERIES_COLORS = ["var(--accent)", "var(--orange)", "var(--green)", "var(--purple)", "var(--pink)"];

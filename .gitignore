@@ -11,3 +11,6 @@ frontend/dist/
 
 # live verification output (may contain model responses and costs)
 verification/openrouter/
+
+# hand-off artefacts (bundle/zip)
+share/

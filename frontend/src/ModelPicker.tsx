@@ -91,9 +91,9 @@ export function Picker({ entries, onSelect, disabled, busy, loading, multi, maxM
   return (
     <div className={`picker ${open ? "open" : ""}`} ref={root}>
       <button className="picker-trigger" onClick={() => setOpen((o) => !o)} disabled={disabled || busy} aria-haspopup="listbox" aria-expanded={open}>
-        <span style={{ display: "grid", placeItems: "center", color: "var(--violet)" }}><Icon name={busy || loading ? "refresh" : multi ? "layers" : "flask"} size={22} /></span>
+        <span>{busy || loading ? <span className="spinner" style={{ width: 20, height: 20, borderWidth: 2.5 }} /> : <Icon name={multi ? "layers" : "search"} size={22} />}</span>
         <span className="ph" style={multi && picked.length ? { color: "var(--text)" } : undefined}>{label}</span>
-        <span className="chev"><Icon name="chev" size={20} /></span>
+        <span className="chev"><Icon name="chev" size={18} stroke={2.2} /></span>
       </button>
 
       {open && (
@@ -101,7 +101,7 @@ export function Picker({ entries, onSelect, disabled, busy, loading, multi, maxM
           <div className="picker-search">
             <Icon name="search" size={18} />
             <input ref={input} value={q} onChange={(e) => setQ(e.target.value)} placeholder={searchPlaceholder} onKeyDown={onKey} aria-label="Search models" />
-            <span className="faint" style={{ fontSize: 12 }}>{loading ? "loading…" : `${filtered.length} models`}</span>
+            <span className="faint">{loading ? "loading…" : `${filtered.length} models`}</span>
           </div>
           <div className="picker-list" ref={list}>
             {customCandidate && (
@@ -166,11 +166,18 @@ export function catalogEntries(models: ModelInfo[]): Entry[] {
 
 const money = (v: number | null) => (v == null ? "?" : v === 0 ? "free" : v < 0.1 ? `$${v.toFixed(3)}` : `$${v.toFixed(2)}`);
 
+const VENDOR_NAMES: Record<string, string> = {
+  openai: "OpenAI", anthropic: "Anthropic", google: "Google", "meta-llama": "Meta Llama", mistralai: "Mistral AI", qwen: "Qwen", deepseek: "DeepSeek",
+  "x-ai": "xAI", cohere: "Cohere", microsoft: "Microsoft", nvidia: "NVIDIA", amazon: "Amazon", perplexity: "Perplexity", "z-ai": "Z.ai", moonshotai: "Moonshot AI",
+  nousresearch: "Nous Research", replay: "Sample models", "ai21": "AI21", "01-ai": "01.AI", thudm: "THUDM", inflection: "Inflection", liquid: "Liquid",
+};
+const vendorName = (v: string) => VENDOR_NAMES[v] ?? v.replace(/^~/, "").replace(/[-_]/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+
 export function openrouterEntries(models: OrModel[], featured: string[]): Entry[] {
   const feat = new Set(featured);
   return models.map((m) => ({
-    id: m.id, name: m.name, desc: m.description || m.id, group: feat.has(m.id) ? "★ Featured" : m.vendor, logo: m.vendor.slice(0, 2),
-    color: familyColor(m.vendor.charAt(0).toUpperCase() + m.vendor.slice(1)) === "#94a3b8" ? pickColor(m.vendor) : familyColor(m.vendor),
+    id: m.id, name: m.name, desc: m.description || m.id, group: feat.has(m.id) ? "★ Featured" : vendorName(m.vendor), logo: vendorName(m.vendor).slice(0, 2),
+    color: familyColor(vendorName(m.vendor)),
     badges: [
       ...(m.open_weights ? [{ text: "open", tone: "green" as const }] : []),
       ...(m.reasoning ? [{ text: "reasoning", tone: "violet" as const }] : []),
@@ -182,11 +189,4 @@ export function openrouterEntries(models: OrModel[], featured: string[]): Entry[
     ],
     search: `${m.name} ${m.id} ${m.vendor} ${m.open_weights ? "open" : "closed"} ${m.reasoning ? "reasoning" : ""}`.toLowerCase(),
   }));
-}
-
-function pickColor(seed: string): string {
-  const palette = ["#60a5fa", "#a78bfa", "#fb923c", "#34d399", "#22d3ee", "#818cf8", "#f472b6", "#fbbf24", "#f87171", "#4ade80"];
-  let h = 0;
-  for (const c of seed) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  return palette[h % palette.length];
 }

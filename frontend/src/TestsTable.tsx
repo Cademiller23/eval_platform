@@ -17,22 +17,26 @@ export function TestsTable({ tests }: { tests: TestResult[] }) {
         {DOMAINS.map((d) => <button key={d} className={dom === d ? "on" : ""} onClick={() => setDom(d)}>{d === "all" ? `All (${tests.length})` : `${d[0].toUpperCase()}${d.slice(1)} (${tests.filter((t) => t.domain === d).length})`}</button>)}
         <button className={onlyFail ? "on" : ""} onClick={() => setOnlyFail(!onlyFail)} style={{ marginLeft: "auto" }}>Only problems</button>
       </div>
-      <div style={{ overflowX: "auto" }}>
-        <table className="table">
-          <thead><tr><th>Test</th><th>Domain</th><th>Result</th><th>Output health</th><th>Tokens</th><th>tok/s</th></tr></thead>
+      <div className="scroll-x">
+        <table className="table tests-table">
+          <thead><tr><th>Test</th><th className="c-domain">Domain</th><th>Result</th><th className="c-health">Output health</th><th className="c-tokens">Tokens</th><th className="c-tps">tok/s</th></tr></thead>
           <tbody>
             {rows.map((t) => (
               <Fragment key={t.id}>
                 <tr className="t-row" onClick={() => setOpen(open === t.id ? null : t.id)}>
-                  <td><div style={{ fontWeight: 600 }}>{t.name}</div><div className="faint" style={{ fontSize: 12 }}>{t.skill} · {t.difficulty}</div></td>
-                  <td><Badge>{t.domain}</Badge></td>
-                  <td>{t.passed ? <Badge tone="green">✓ pass</Badge> : t.score > 0 ? <Badge tone="amber">partial {Math.round(t.score * 100)}%</Badge> : <Badge tone="red">✗ fail</Badge>}</td>
-                  <td>{t.health?.issues.length ? t.health.issues.slice(0, 3).map((i) => <Badge key={i.kind} tone={i.severity === "minor" ? "amber" : "red"}>{i.kind.replace(/_/g, " ")}</Badge>) : <Badge tone="green">clean</Badge>}</td>
-                  <td className="mono muted">{t.metrics.tokens ?? "—"}</td>
-                  <td className="mono muted">{fmt(t.metrics.decode_tps, 0)}</td>
+                  <td className="c-name">
+                    <div style={{ fontWeight: 600, letterSpacing: "-0.012em" }}>{t.name}</div>
+                    <div className="faint" style={{ fontSize: 12 }}>{t.domain} · {t.skill} · {t.difficulty}</div>
+                    {!!t.health?.issues.length && <div className="mobile-only">{t.health.issues.slice(0, 2).map((i) => <Badge key={i.kind} tone={i.severity === "minor" ? "amber" : "red"}>{i.kind.replace(/_/g, " ")}</Badge>)}</div>}
+                  </td>
+                  <td className="c-domain"><Badge>{t.domain}</Badge></td>
+                  <td>{t.passed ? <Badge tone="green">Pass</Badge> : t.score > 0 ? <Badge tone="amber">Partial {Math.round(t.score * 100)}%</Badge> : <Badge tone="red">Fail</Badge>}</td>
+                  <td className="c-health">{t.health?.issues.length ? t.health.issues.slice(0, 3).map((i) => <Badge key={i.kind} tone={i.severity === "minor" ? "amber" : "red"}>{i.kind.replace(/_/g, " ")}</Badge>) : <Badge tone="green">Clean</Badge>}</td>
+                  <td className="c-tokens num muted">{t.metrics.tokens ?? "—"}</td>
+                  <td className="c-tps num muted">{fmt(t.metrics.decode_tps, 0)}</td>
                 </tr>
                 {open === t.id && (
-                  <tr><td colSpan={6}>
+                  <tr><td colSpan={6} style={{ padding: 0 }}>
                     <div className="detail">
                       {t.error && <div className="banner err">{t.error}</div>}
                       <div><h5>Prompt</h5><div className="resp" style={{ maxHeight: 140 }}>{t.prompt}</div></div>

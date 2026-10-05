@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "./api";
+import { IS_DEMO } from "./env";
 import { providerLabel, savedOpenRouterKey } from "./Home";
 import { Recommendations } from "./Recs";
 import { TestsTable } from "./TestsTable";
@@ -13,7 +14,17 @@ export function Report({ run }: { run: RunFull }) {
   const [parent, setParent] = useState<R | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const pid = r.options.parent_run_id;
+
+  const copyMarkdown = async () => {
+    try {
+      const md = await (await fetch(`/api/runs/${r.run_id}/report.md`)).text();
+      await navigator.clipboard.writeText(md);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch { setErr("Copy is blocked in this view. Open the full app to download the report."); }
+  };
 
   useEffect(() => {
     if (!pid) return;
@@ -47,10 +58,11 @@ export function Report({ run }: { run: RunFull }) {
     <>
       {parent && <Compare a={parent} b={r} />}
 
-      <div className={`card verdict ${v.label}`} style={{ marginTop: 22 }}>
+      <div className={`card verdict ${v.label}`} style={{ marginTop: 24 }}>
         <ScoreRing value={s.overall} grade={s.grade} />
-        <div style={{ position: "relative" }}>
-          <h2>{v.label === "ready" ? "✅ " : v.label === "caution" ? "⚠️ " : "⛔ "}{v.title}</h2>
+        <div>
+          <div className="status"><i /> Overall verdict</div>
+          <h2>{v.title}</h2>
           <p className="summary">{v.summary}</p>
           <div className="chips">
             {v.blockers.map((b) => <span key={b} className="chip bad"><Icon name="x" size={15} /> {b}</span>)}
@@ -58,10 +70,16 @@ export function Report({ run }: { run: RunFull }) {
             {v.strengths.map((b) => <span key={b} className="chip good"><Icon name="check" size={15} /> {b}</span>)}
           </div>
           <div className="actions">
-            {canRerun && apply && <button className="btn primary" disabled={busy} onClick={() => rerun(apply.speculative)}><Icon name="bolt" size={16} /> Re-run with {apply.speculative.toUpperCase()} speculative decoding</button>}
+            {canRerun && apply && <button className="btn primary" disabled={busy} onClick={() => rerun(apply.speculative)}><Icon name="bolt" size={16} /> Re-run with {apply.speculative.toUpperCase()}</button>}
             {canRerun && <button className="btn" disabled={busy} onClick={() => rerun()}><Icon name="refresh" size={16} /> Run again</button>}
-            <a className="btn" href={`/api/runs/${r.run_id}/report.md`} download={`report-${r.run_id}.md`}><Icon name="download" size={16} /> Markdown</a>
-            <a className="btn" href={`/api/runs/${r.run_id}/report.json`}><Icon name="download" size={16} /> JSON</a>
+            {IS_DEMO ? (
+              <button className="btn" onClick={copyMarkdown}><Icon name="copy" size={16} /> {copied ? "Copied" : "Copy as Markdown"}</button>
+            ) : (
+              <>
+                <a className="btn" href={`/api/runs/${r.run_id}/report.md`} download={`report-${r.run_id}.md`}><Icon name="download" size={16} /> Markdown</a>
+                <a className="btn" href={`/api/runs/${r.run_id}/report.json`}><Icon name="download" size={16} /> JSON</a>
+              </>
+            )}
           </div>
           {err && <div className="banner err" style={{ marginTop: 12 }}>{err}</div>}
         </div>
@@ -163,8 +181,10 @@ export function Report({ run }: { run: RunFull }) {
         <div className="card">
           <div style={{ display: "flex", justifyContent: "space-between", gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}>
             <div>
-              <h3 style={{ fontSize: 20 }}>{r.speculative.headline}</h3>
-              <p className="sub" style={{ marginBottom: 0 }}>Detected from engine config, Prometheus counters and token-arrival behaviour · confidence {pct(r.speculative.confidence)}</p>
+              <h3 style={{ fontSize: 22, letterSpacing: "-0.025em" }}>{r.speculative.headline}</h3>
+              <p className="sub" style={{ marginBottom: 0 }}>{r.speculative.hosted
+                ? "Hosted APIs don't expose their engine, so nothing can be confirmed from outside."
+                : `Read from the engine config, its metrics and how tokens arrive · confidence ${pct(r.speculative.confidence)}`}</p>
             </div>
             <Badge tone={r.speculative.status === "active" ? "green" : r.speculative.status === "not_detected" ? "amber" : r.speculative.status === "likely" ? "cyan" : undefined}>
               {r.speculative.status === "active" ? "ACTIVE" : r.speculative.status === "likely" ? "LIKELY" : r.speculative.status === "not_detected" ? "NOT IN USE" : "UNKNOWN"}
@@ -182,11 +202,14 @@ export function Report({ run }: { run: RunFull }) {
               ))}
             </div>
             <div className="kv">
-              <div><span className="k">Draft acceptance rate</span><span className="v">{pct(r.speculative.acceptance_rate)}</span></div>
-              <div><span className="k">Tokens per engine step</span><span className="v">{fmt(r.speculative.mean_accepted_length, 2)}</span></div>
-              <div><span className="k">Multi-token stream chunks</span><span className="v">{pct(r.speculative.multi_token_chunk_ratio)}</span></div>
+              {!r.speculative.hosted && <>
+                <div><span className="k">Draft acceptance rate</span><span className="v">{pct(r.speculative.acceptance_rate)}</span></div>
+                <div><span className="k">Tokens per engine step</span><span className="v">{fmt(r.speculative.mean_accepted_length, 2)}</span></div>
+                <div><span className="k">Multi-token stream chunks</span><span className="v">{pct(r.speculative.multi_token_chunk_ratio)}</span></div>
+              </>}
               <div><span className="k">Prompt-copy potential (n-gram)</span><span className="v">{r.speculative.copy_ratio_by_domain ? pct(Object.values(r.speculative.copy_ratio_by_domain).reduce((a, b) => a + b, 0) / Math.max(1, Object.keys(r.speculative.copy_ratio_by_domain).length)) : "—"}</span></div>
               <div><span className="k">Native MTP layers</span><span className="v">{r.speculative.native_mtp ? "Yes" : "No"}</span></div>
+              {r.speculative.hosted && <div><span className="k">Weights</span><span className="v">{r.environment.open_weights ? "Open, can be self-hosted" : "Closed"}</span></div>}
             </div>
           </div>
         </div>
@@ -201,17 +224,17 @@ export function Report({ run }: { run: RunFull }) {
               ["Special-token leaks", r.coherency.special_token_leak_rate, false], ["Runaway / never-stops", r.coherency.runaway_rate, false], ["Empty answers", r.coherency.empty_rate, false],
             ] as const).map(([label, val, good]) => (
               <div key={label}>
-                <div className="faint" style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700 }}>{label}</div>
-                <div style={{ fontSize: 28, fontWeight: 800, margin: "6px 0 8px", color: good ? scoreColor(val * 100) : val === 0 ? "var(--green)" : val < 0.08 ? "var(--amber)" : "var(--red)" }}>{pct(val)}</div>
+                <div className="label-s">{label}</div>
+                <div className="num" style={{ fontFamily: "var(--rounded)", fontSize: 30, fontWeight: 700, letterSpacing: "-0.03em", margin: "6px 0 10px", color: good ? scoreColor(val * 100) : val === 0 ? "var(--green)" : val < 0.08 ? "var(--amber)" : "var(--red)" }}>{pct(val)}</div>
                 <Bar value={good ? val * 100 : (1 - Math.min(1, val * 4)) * 100} />
               </div>
             ))}
           </div>
           {Object.keys(r.coherency.issue_kinds).length > 0 && (
             <div style={{ marginTop: 22 }}>
-              <div className="faint" style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700, marginBottom: 10 }}>Issues found across {r.coherency.responses} responses</div>
+              <div className="label-s" style={{ marginBottom: 10 }}>Issues found across {r.coherency.responses} responses</div>
               <div className="chips">
-                {Object.entries(r.coherency.issue_kinds).map(([k, v]) => <span key={k} className="chip"><b className="mono">{k.replace(/_/g, " ")}</b> <span className="muted">×{v.count}</span></span>)}
+                {Object.entries(r.coherency.issue_kinds).map(([k, v]) => <span key={k} className="chip"><b>{k.replace(/_/g, " ")}</b> <span className="muted">×{v.count}</span></span>)}
               </div>
             </div>
           )}

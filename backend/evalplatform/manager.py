@@ -101,6 +101,14 @@ class RunManager:
         h.task = asyncio.create_task(self._execute(h))
         return h
 
+    @staticmethod
+    def _sync_model(h: RunHandle, runner: Runner, ev: dict[str, Any]) -> None:
+        """The provider learns the real display name / context / weights while starting; reflect that in the run."""
+        if ev.get("type") == "environment":
+            for k in ("name", "family", "hf_repo", "params_b", "reasoning", "tags"):
+                if runner.model.get(k) is not None:
+                    h.model[k] = runner.model[k]
+
     async def _execute(self, h: RunHandle) -> None:
         h.status, h.started_at = "running", now_iso()
         h.emit({"type": "status", "status": "running"})
@@ -108,7 +116,7 @@ class RunManager:
             h.persist()
         except Exception:  # pragma: no cover
             pass
-        runner = Runner(h.id, h.options, h.emit)
+        runner = Runner(h.id, h.options, lambda ev: (self._sync_model(h, runner, ev), h.emit(ev)))
         try:
             h.report = await runner.run()
             h.status = "completed"

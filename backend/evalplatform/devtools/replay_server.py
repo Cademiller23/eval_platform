@@ -33,13 +33,13 @@ RAW_DIR = Path(__file__).resolve().parents[3] / "verification" / "raw"
 
 # tokens/second each replay "model" streams at, and $/M-token pricing
 PROFILES = {
-    "haiku": dict(tps=190, p_in=0.8, p_out=4.0, provider="Replay-East"),
-    "sonnet": dict(tps=95, p_in=3.0, p_out=15.0, provider="Replay-East"),
-    "opus": dict(tps=55, p_in=15.0, p_out=75.0, provider="Replay-West"),
-    "fable": dict(tps=75, p_in=5.0, p_out=25.0, provider="Replay-West"),
+    "haiku": dict(tps=190, ttft=0.38, p_in=0.8, p_out=4.0, provider="Replay-East"),
+    "sonnet": dict(tps=95, ttft=0.62, p_in=3.0, p_out=15.0, provider="Replay-East"),
+    "opus": dict(tps=55, ttft=1.05, p_in=15.0, p_out=75.0, provider="Replay-West"),
+    "fable": dict(tps=75, ttft=0.8, p_in=5.0, p_out=25.0, provider="Replay-West"),
     # NOT a real model: a deterministic emulation of a weak model, derived from the opus recording, so that
     # discrimination checks ("does the suite separate strong from weak?") can run offline.
-    "tiny": dict(tps=320, p_in=0.05, p_out=0.1, provider="Replay-East"),
+    "tiny": dict(tps=320, ttft=0.22, p_in=0.05, p_out=0.1, provider="Replay-East"),
 }
 
 
@@ -99,14 +99,14 @@ def build_app(recordings: dict[str, dict[str, str]] | None = None, *, speed: flo
         for name, prof in PROFILES.items():
             if name in recs:
                 data.append({
-                    "id": f"replay/{name}", "name": (f"Replay: {name} (EMULATED weak model)" if name == "tiny" else f"Replay: {name} (recorded real outputs)"), "context_length": 200000,
-                    "description": ("EMULATED weak model (derived from opus answers) for discrimination checks." if name == "tiny" else f"Replays real {name} answers to the evaluation prompts."), "hugging_face_id": "",
+                    "id": f"replay/{name}", "name": ("Tiny (emulated weak model)" if name == "tiny" else f"{name.capitalize()} (recorded answers)"), "context_length": 200000,
+                    "description": ("An emulated weak model (derived from the Opus answers) for discrimination checks." if name == "tiny" else f"{name.capitalize()}'s actual answers to every evaluation prompt, replayed."), "hugging_face_id": "",
                     "pricing": {"prompt": str(prof["p_in"] / 1e6), "completion": str(prof["p_out"] / 1e6)},
                     "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
                     "supported_parameters": ["temperature", "top_p", "frequency_penalty", "presence_penalty", "repetition_penalty", "max_tokens"],
                 })
         if slow_variant and "opus" in recs:   # a deliberately slow model, for cancel/timeout tests
-            data.append({**next(d for d in data if d["id"] == "replay/opus"), "id": "replay/opus:slow", "name": "Replay: opus (SLOW — for cancel tests)"})
+            data.append({**next(d for d in data if d["id"] == "replay/opus"), "id": "replay/opus:slow", "name": "Opus (slow variant, for cancel tests)"})
         return {"data": data}
 
     @app.get("/api/v1/key")
@@ -176,7 +176,8 @@ def build_app(recordings: dict[str, dict[str, str]] | None = None, *, speed: flo
 
         async def gen():
             yield ": OPENROUTER PROCESSING\n\n"
-            await asyncio.sleep(0.02 / spd)
+            # queueing + prefill: the model's typical time to first token (scaled by --speed), with a little jitter
+            await asyncio.sleep(prof["ttft"] * (0.85 + 0.3 * random.random()) / spd)
             done = 0
             i = 0
             step = max(1, round(prof["tps"] * spd / 60))   # tokens per SSE chunk ≈ what gateways emit

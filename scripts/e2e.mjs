@@ -79,7 +79,7 @@ await step("dropdown lists live OpenRouter models with prices", async () => {
 let runUrl;
 await step("selecting a model starts a run immediately and shows live progress", async () => {
   await page.click('button[aria-label="Quick mode"]').catch(async () => { await page.click(".opts-toggle"); await page.click('button[aria-label="Quick mode"]'); });
-  await pick("sonnet", "Replay: sonnet");
+  await pick("sonnet", "Sonnet (recorded");
   await page.waitForURL(/\/runs\//);
   runUrl = page.url();
   await page.waitForSelector(".stepper .step");
@@ -113,7 +113,7 @@ await step("stress control run shows the detector self-check banner", async () =
   await page.click(".opts-toggle");
   await page.selectOption("select >> nth=-1", "garble");
   await page.click('button[aria-label="Quick mode"]');
-  await pick("sonnet", "Replay: sonnet");
+  await pick("sonnet", "Sonnet (recorded");
   await page.waitForSelector(".verdict", { timeout: 120000 });
   const t = await page.textContent("body");
   expect(t.includes("Detector self-check") && t.includes("Working as intended"), "self-check banner missing");
@@ -124,7 +124,7 @@ await step("compare mode: 3 models → leaderboard, radar, takeaways", async () 
   await page.click(".opts-toggle");
   await page.click('button[aria-label="Compare mode"]'); await page.click('button[aria-label="Quick mode"]');
   await page.click(".picker-trigger");
-  for (const n of ["haiku", "sonnet", "tiny"]) await page.click(`.picker-item:has-text("Replay: ${n}")`);
+  for (const n of ["haiku", "sonnet", "tiny"]) await page.click(`.picker-item:has-text("${n.charAt(0).toUpperCase()+n.slice(1)} (")`);
   await page.click("text=/Evaluate 3 models/");
   await page.waitForURL(/\/compare\?ids=/);
   await page.waitForFunction(() => document.querySelectorAll("table.cmp tbody tr").length === 3, null, { timeout: 180000 });
@@ -155,14 +155,14 @@ await step("no server key: UI asks for a key, rejects a start without one, then 
   await p2.goto(BASE2, { waitUntil: "networkidle" });
   expect((await p2.textContent("body")).includes("OpenRouter key needed"), "missing 'key needed' banner");
   await p2.click(".picker-trigger"); await p2.fill(".picker-search input", "haiku"); await p2.waitForTimeout(250);
-  await p2.click(".picker-item:has-text('Replay: haiku')");
+  await p2.click(".picker-item:has-text('Haiku (recorded')");
   await p2.waitForSelector(".banner.err", { timeout: 10000 });
   expect((await p2.textContent(".banner.err")).toLowerCase().includes("key"), "should explain that a key is required");
   await p2.waitForSelector("input[type=password]");
   await p2.fill("input[type=password]", "e2e-key");
   await p2.click('button[aria-label="Quick mode"]');
   await p2.click(".picker-trigger"); await p2.fill(".picker-search input", "haiku"); await p2.waitForTimeout(250);
-  await p2.click(".picker-item:has-text('Replay: haiku')");
+  await p2.click(".picker-item:has-text('Haiku (recorded')");
   await p2.waitForSelector(".verdict", { timeout: 120000 });
   const id = p2.url().split("/runs/")[1];
   const stored = await (await fetch(`${BASE2}/api/runs/${id}`)).text();

@@ -189,6 +189,7 @@ def create_app() -> FastAPI:
                 raise HTTPException(400, "No OpenRouter API key. Set OPENROUTER_API_KEY on the server or enter a key in Run options.")
             if req.speculative not in ("auto", "none"):
                 raise HTTPException(422, "Speculative decoding can't be configured on a hosted API. Use the Modal provider to test it.")
+            await orp.fetch_models()   # warm the model cache so the run gets its display name and metadata immediately
         if opts["provider"] == "openai" and not (req.endpoint and req.endpoint.base_url):
             raise HTTPException(422, "The custom-endpoint provider needs an endpoint base_url.")
         from .providers import get_provider

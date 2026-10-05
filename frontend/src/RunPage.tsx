@@ -72,7 +72,7 @@ export function RunPage() {
     return () => clearInterval(t);
   }, [run, load]);
 
-  if (err) return <div className="empty"><h2>Run not found</h2><p>{err}</p><Link className="btn" to="/">Back home</Link></div>;
+  if (err) return <div className="empty"><h2>Run not found</h2><p>{err}</p><Link className="btn primary" to="/">Back to start</Link></div>;
   if (!run) return <div className="skeleton" style={{ height: 320, marginTop: 30 }} />;
 
   const finished = run.status === "completed" && run.report;
@@ -85,12 +85,12 @@ export function RunPage() {
           <h1>{run.model.name}</h1>
           <div className="sub">
             <span className="mono">{run.model.hf_repo}</span>
-            {run.options.provider === "mock" && <Badge tone="violet">demo</Badge>}
+            {run.options.provider === "mock" && <Badge tone="violet">Demo</Badge>}
             {run.options.provider === "openrouter" && <Badge tone="cyan">OpenRouter</Badge>}
-            {run.options.stress && <Badge tone="amber">stress: {run.options.stress}</Badge>}
-            {run.options.speculative && run.options.speculative !== "auto" && run.options.provider !== "openrouter" && <Badge tone="cyan">spec: {run.options.speculative}</Badge>}
-            {run.options.quick && <Badge>quick</Badge>}
-            {active && <Badge tone="violet"><span className="spinner" style={{ width: 10, height: 10 }} /> evaluating</Badge>}
+            {run.options.stress && <Badge tone="amber">Self-check: {run.options.stress}</Badge>}
+            {run.options.speculative && run.options.speculative !== "auto" && run.options.provider !== "openrouter" && <Badge tone="cyan">Speculative: {run.options.speculative}</Badge>}
+            {run.options.quick && <Badge>Quick</Badge>}
+            {active && <Badge tone="violet"><span className="spinner" style={{ width: 10, height: 10 }} /> Evaluating</Badge>}
           </div>
         </div>
         <div className="actions" style={{ marginTop: 0 }}>
@@ -142,18 +142,19 @@ function LiveView({ run, live }: { run: RunFull; live: Live }) {
 
   return (
     <>
-      <div className="stepper">
+      <div className="stepper" role="list" aria-label="Evaluation progress">
         {phases.map((p, i) => {
           const pr = live.progress[p.id];
-          const pctw = p.status === "running" && pr ? (pr.done / Math.max(1, pr.total)) * 100 : p.status === "running" ? 12 : 0;
           return (
-            <div key={p.id} className={`step ${p.status}`} style={{ ["--p" as string]: `${pctw}%` }}>
+            <div key={p.id} role="listitem" className={`step ${p.status}`} aria-current={p.status === "running" ? "step" : undefined}>
               <div className="n">
-                <span>{String(i + 1).padStart(2, "0")}</span>
-                {p.status === "running" ? <span className="spinner" /> : p.status === "done" ? <span style={{ color: "var(--green)" }}><Icon name="check" size={14} stroke={2.6} /></span> : p.status === "error" ? <span style={{ color: "var(--red)" }}><Icon name="x" size={14} stroke={2.6} /></span> : null}
+                {p.status === "running" ? <span className="spinner" style={{ width: 13, height: 13 }} />
+                  : p.status === "done" ? <Icon name="check" size={14} stroke={3} />
+                  : p.status === "error" ? <Icon name="x" size={14} stroke={3} />
+                  : i + 1}
               </div>
               <div className="t">{p.title}</div>
-              <div className="d">{p.status === "running" && pr ? `${pr.done}/${pr.total}` : p.detail}</div>
+              <div className="d">{p.status === "running" && pr ? `${pr.done} of ${pr.total}` : p.detail}</div>
             </div>
           );
         })}
@@ -161,7 +162,7 @@ function LiveView({ run, live }: { run: RunFull; live: Live }) {
 
       <div className="live-grid">
         <div className="card">
-          <h3>Live decode speed</h3>
+          <h3>Decode speed</h3>
           <p className="sub">Tokens per second as the model streams</p>
           <div className="gauge-num">{live.tps != null ? fmt(live.tps, 0) : live.perf?.decode_tps_median ? fmt(live.perf.decode_tps_median, 0) : "—"}<small>tok/s</small></div>
           <div style={{ marginTop: 16 }}><Sparkline values={live.tpsHistory} /></div>

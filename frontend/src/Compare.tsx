@@ -3,7 +3,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { api } from "./api";
 import { providerLabel } from "./Home";
 import type { RunFull } from "./types";
-import { Badge, Icon, MultiRadar, SERIES_COLORS, fmt, scoreColor, verdictTone } from "./ui";
+import { Badge, MultiRadar, SERIES_COLORS, fmt, scoreColor, verdictTone } from "./ui";
 
 type Col = { key: string; label: string; get: (r: RunFull) => number | null; fmt: (v: number) => string; best: "max" | "min" };
 
@@ -120,14 +120,14 @@ export function Compare() {
           <div className="section">
             <h2>Leaderboard</h2>
             <div className="card" style={{ padding: 0, overflow: "hidden" }}>
-              <div style={{ overflowX: "auto" }}>
+              <div className="scroll-x">
                 <table className="table cmp">
-                  <thead><tr><th>#</th><th>Model</th><th>Verdict</th>{COLS.map((c) => <th key={c.key}>{c.label}</th>)}</tr></thead>
+                  <thead><tr><th>#</th><th className="model">Model</th><th>Verdict</th>{COLS.map((c) => <th key={c.key}>{c.label}</th>)}</tr></thead>
                   <tbody>
                     {sorted.map((r, i) => (
                       <tr key={r.id}>
-                        <td className="mono muted">{i + 1}</td>
-                        <td>
+                        <td className="num muted">{i + 1}</td>
+                        <td className="model">
                           <Link to={`/runs/${r.id}`} style={{ fontWeight: 650, display: "flex", gap: 9, alignItems: "center" }}>
                             <span className="swatch" style={{ background: color(r.id) }} />{r.model.name}
                           </Link>
@@ -139,8 +139,8 @@ export function Compare() {
                           const best = bestOf(c);
                           const isBest = v != null && best != null && v === best;
                           return (
-                            <td key={c.key} className="mono" style={{ fontWeight: isBest ? 800 : 500, color: isBest ? "var(--green)" : c.key === "overall" && v != null ? scoreColor(v) : undefined }}>
-                              {v == null ? "—" : c.fmt(v)}{isBest && <span title="best in column"> ★</span>}
+                            <td key={c.key} className="num" style={{ fontWeight: isBest ? 700 : 500, color: isBest ? "var(--green-ink)" : c.key === "overall" && v != null ? scoreColor(v) : undefined }}>
+                              {v == null ? "—" : c.fmt(v)}{isBest && <span title="Best in column" aria-label="best in column"> ★</span>}
                             </td>
                           );
                         })}
@@ -170,7 +170,7 @@ export function Compare() {
         </>
       )}
       {sorted.length === 0 && live.length === 0 && <div className="empty">No completed runs to compare yet.</div>}
-      <div className="footer"><Icon name="compare" size={14} /> ★ marks the best value in each column</div>
+      <div className="footer">★ marks the best value in each column</div>
     </>
   );
 }
