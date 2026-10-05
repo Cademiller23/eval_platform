@@ -4,8 +4,9 @@ from .base import ChatResult, LaunchSpec, Provider, Session
 from .mock_provider import MockProvider
 from .modal_provider import ModalProvider
 from .openai_provider import OpenAIProvider
+from .openrouter_provider import OpenRouterProvider
 
-_PROVIDERS: dict[str, Provider] = {p.name: p for p in (ModalProvider(), OpenAIProvider(), MockProvider())}
+_PROVIDERS: dict[str, Provider] = {p.name: p for p in (ModalProvider(), OpenRouterProvider(), OpenAIProvider(), MockProvider())}
 
 
 def get_provider(name: str) -> Provider:

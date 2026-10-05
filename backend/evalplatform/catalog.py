@@ -186,3 +186,28 @@ def _suggest_gpu(params_b: float, bytes_per_param: float) -> str:
     if gb <= 135:
         return "H200"
     return f"H200:{min(8, math.ceil(gb / 135))}"
+
+
+def openrouter_model(slug: str, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Catalog-like entry for a model served through OpenRouter.
+
+    Open-weight models are mapped back to our catalog (via their Hugging Face id) so the report can give the
+    right self-hosting / speculative-decoding recipe; closed models get none.
+    """
+    meta = meta or {}
+    hf = meta.get("hf_id") or ""
+    base = get_model(hf) if hf else None
+    m = _SIZE_RE.search(slug.split("/")[-1])
+    params = (base or {}).get("params_b") or (float(m.group(1)) if m else 0.0)
+    open_weights = bool(hf) or bool(meta.get("open_weights"))
+    vendor = slug.split("/")[0]
+    reasoning = bool(meta.get("reasoning")) or bool(re.search(r"(r1|reason|thinking|qwq)", slug, re.I))
+    return dict(
+        id=f"or:{slug}", name=meta.get("name") or slug, family=(base or {}).get("family") or vendor.title(), hf_repo=hf or slug,
+        params_b=params, active_params_b=(base or {}).get("active_params_b") or params, context=meta.get("context_length") or 8192,
+        min_gpu=None, gated=False, reasoning=reasoning, trust_remote_code=False, mtp_native=bool((base or {}).get("mtp_native")),
+        mtp_method=(base or {}).get("mtp_method"), chat_template_kwargs={}, dtype_bytes=2.0, tags=["hosted"] + (["open weights"] if open_weights else ["closed"]),
+        mock_bias={}, mock_tps_boost=1.0, mock_quality=0.6, description="Hosted via OpenRouter.",
+        speculators=list((base or {}).get("speculators") or ([dict(_NGRAM)] if open_weights else [])), custom=True,
+        hosted=True, open_weights=open_weights, openrouter_slug=slug,
+    )

@@ -1,6 +1,12 @@
-"""Evaluate any running OpenAI-compatible server (vLLM, SGLang, TGI, Ollama, LM Studio, ...)."""
+"""Evaluate any running OpenAI-compatible server (vLLM, SGLang, TGI, Ollama, LM Studio, ...).
+
+``OpenAISession`` is also the base class of the OpenRouter session: the hooks ``_headers``,
+``_request_body`` and ``_on_chunk`` exist so hosted APIs can customise requests without
+re-implementing streaming, retries and error handling.
+"""
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any, AsyncIterator
@@ -10,14 +16,30 @@ import httpx
 
 from .base import LaunchSpec, Provider, ProgressFn, Session
 
+RETRYABLE = {408, 409, 425, 429, 500, 502, 503, 504}
+
 
 def server_root(base_url: str) -> str:
     u = urlparse(base_url)
     return f"{u.scheme}://{u.netloc}"
 
 
+def error_message(obj: Any) -> str:
+    """Pull a readable message out of the many shapes providers use for errors."""
+    if isinstance(obj, dict):
+        err = obj.get("error", obj)
+        if isinstance(err, dict):
+            msg = err.get("message") or err.get("detail") or json.dumps(err)[:300]
+            code = err.get("code")
+            return f"{msg} (code {code})" if code else str(msg)
+        return str(err)[:300]
+    return str(obj)[:300]
+
+
 def parse_sse_chunk(obj: dict[str, Any], state: dict[str, Any], t0: float) -> dict[str, Any] | None:
     """Translate one OpenAI streaming JSON chunk into our event dict (or None to skip)."""
+    if obj.get("error"):  # mid-stream failure (OpenRouter and others send errors as data chunks)
+        return {"error": error_message(obj)}
     usage = obj.get("usage")
     choices = obj.get("choices") or []
     ev: dict[str, Any] | None = None
@@ -58,6 +80,10 @@ def parse_sse_chunk(obj: dict[str, Any], state: dict[str, Any], t0: float) -> di
 
 
 class OpenAISession(Session):
+    max_retries = 0           # retryable HTTP failures are retried only by subclasses that opt in
+    wants_logprobs = True
+    wants_continuous_usage = True
+
     def __init__(self, base_url: str, api_key: str | None, model: str, info: dict[str, Any], extra_body: dict[str, Any] | None = None):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -66,83 +92,105 @@ class OpenAISession(Session):
         self.extra_body = extra_body or {}
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=20.0))
 
+    # ---- hooks -------------------------------------------------------------------------------
     def _headers(self) -> dict[str, str]:
         h = {"Content-Type": "application/json"}
         if self.api_key:
             h["Authorization"] = f"Bearer {self.api_key}"
         return h
 
-    async def stream(self, messages, *, max_tokens, temperature, meta=None, extra=None) -> AsyncIterator[dict[str, Any]]:
-        body = {
+    def _request_body(self, messages, max_tokens, temperature, extra) -> dict[str, Any]:
+        body: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": True,
-            "stream_options": {"include_usage": True, "continuous_usage_stats": True},
-            "logprobs": True,
+            "stream_options": {"include_usage": True, **({"continuous_usage_stats": True} if self.wants_continuous_usage else {})},
             **self.extra_body,
             **(extra or {}),
         }
+        if self.wants_logprobs:
+            body["logprobs"] = True
         if temperature == 0:
             body.setdefault("seed", 0)
-        t0 = time.perf_counter()
-        state: dict[str, Any] = {}
-        try:
-            async with self._client.stream("POST", f"{self.base_url}/chat/completions", headers=self._headers(), json=body) as r:
-                if r.status_code >= 400 and body.get("logprobs"):
-                    # Some servers reject logprobs/continuous usage; retry without the extras.
-                    await r.aread()
-                    body.pop("logprobs", None)
-                    body["stream_options"] = {"include_usage": True}
-                    async for ev in self._retry(body, t0, state):
-                        yield ev
-                    return
-                if r.status_code >= 400:
-                    detail = (await r.aread()).decode("utf-8", "replace")[:500]
-                    yield {"error": f"HTTP {r.status_code}: {detail}"}
-                    return
-                async for line in r.aiter_lines():
-                    ev = self._handle_line(line, state, t0)
-                    if ev == "DONE":
-                        break
-                    if ev:
-                        yield ev
-        except httpx.HTTPError as e:
-            yield {"error": f"{type(e).__name__}: {e}"}
-            return
-        yield {"done": True, "finish_reason": state.get("finish_reason"), "usage": state.get("usage") or {}, "total_t": time.perf_counter() - t0}
+        return body
 
-    async def _retry(self, body, t0, state):
-        try:
-            async with self._client.stream("POST", f"{self.base_url}/chat/completions", headers=self._headers(), json=body) as r:
-                if r.status_code >= 400:
-                    detail = (await r.aread()).decode("utf-8", "replace")[:500]
-                    yield {"error": f"HTTP {r.status_code}: {detail}"}
-                    return
-                async for line in r.aiter_lines():
-                    ev = self._handle_line(line, state, t0)
-                    if ev == "DONE":
-                        break
-                    if ev:
-                        yield ev
-        except httpx.HTTPError as e:
-            yield {"error": f"{type(e).__name__}: {e}"}
-            return
-        yield {"done": True, "finish_reason": state.get("finish_reason"), "usage": state.get("usage") or {}, "total_t": time.perf_counter() - t0}
+    def _on_chunk(self, obj: dict[str, Any], state: dict[str, Any]) -> None:
+        """Subclass hook: inspect raw chunk objects (provider names, cost, ...)."""
 
-    @staticmethod
-    def _handle_line(line: str, state, t0):
-        if not line or not line.startswith("data:"):
-            return None
-        payload = line[5:].strip()
-        if payload == "[DONE]":
-            return "DONE"
-        try:
-            obj = json.loads(payload)
-        except json.JSONDecodeError:
-            return None
-        return parse_sse_chunk(obj, state, t0)
+    # ---- streaming ---------------------------------------------------------------------------
+    async def stream(self, messages, *, max_tokens, temperature, meta=None, extra=None) -> AsyncIterator[dict[str, Any]]:
+        body = self._request_body(messages, max_tokens, temperature, extra)
+        attempt = 0
+        while True:
+            t0 = time.perf_counter()
+            state: dict[str, Any] = {}
+            emitted = False
+            retry_after: float | None = None
+            failure: str | None = None
+            retry_body = False
+            try:
+                async with self._client.stream("POST", f"{self.base_url}/chat/completions", headers=self._headers(), json=body) as r:
+                    if r.status_code >= 400:
+                        raw = (await r.aread()).decode("utf-8", "replace")
+                        try:
+                            msg = error_message(json.loads(raw))
+                        except ValueError:
+                            msg = raw[:300]
+                        if r.status_code == 400 and (body.get("logprobs") or "continuous_usage_stats" in body.get("stream_options", {})):
+                            # Some servers reject logprobs / continuous usage; they are optional signals.
+                            body.pop("logprobs", None)
+                            body["stream_options"] = {"include_usage": True}
+                            self.wants_logprobs = False
+                            self.wants_continuous_usage = False
+                            retry_body = True
+                        else:
+                            failure = f"HTTP {r.status_code}: {msg}"
+                            if r.status_code in RETRYABLE:
+                                try:
+                                    retry_after = float(r.headers.get("retry-after", ""))
+                                except ValueError:
+                                    retry_after = None
+                    else:
+                        async for line in r.aiter_lines():
+                            if not line or not line.startswith("data:"):
+                                continue  # blank lines and ':' keep-alive comments
+                            payload = line[5:].strip()
+                            if payload == "[DONE]":
+                                break
+                            try:
+                                obj = json.loads(payload)
+                            except json.JSONDecodeError:
+                                continue
+                            self._on_chunk(obj, state)
+                            ev = parse_sse_chunk(obj, state, t0)
+                            if ev and ev.get("error"):
+                                failure = ev["error"]
+                                break
+                            if ev:
+                                emitted = True
+                                yield ev
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                failure = f"{type(e).__name__}: {e}"
+                retry_after = retry_after or None
+                retryable_exc = True
+            else:
+                retryable_exc = False
+
+            if retry_body:
+                continue
+            if failure is None:
+                yield {"done": True, "finish_reason": state.get("finish_reason"), "usage": state.get("usage") or {}, "total_t": time.perf_counter() - t0}
+                return
+            can_retry = (not emitted) and attempt < self.max_retries and (retryable_exc or failure.startswith(tuple(f"HTTP {c}" for c in RETRYABLE)))
+            if can_retry:
+                delay = retry_after if retry_after is not None else min(30.0, 1.5 * (2 ** attempt))
+                attempt += 1
+                await asyncio.sleep(delay)
+                continue
+            yield {"error": failure}
+            return
 
     async def metrics(self) -> str | None:
         try:

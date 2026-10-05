@@ -17,6 +17,7 @@ from .config import get_settings, hf_token, modal_credentials_present, modal_sdk
 from .knowledge import GPUS
 from .manager import RunManager
 from .providers import list_providers
+from .providers import openrouter_provider as orp
 from .report_md import to_markdown
 from .suite.tasks import build_suite
 
@@ -39,7 +40,10 @@ class Endpoint(BaseModel):
 class RunRequest(BaseModel):
     model_id: str = ""
     custom_model: CustomModel | None = None
-    provider: Literal["modal", "openai", "mock"] | None = None
+    provider: Literal["modal", "openrouter", "openai", "mock"] | None = None
+    openrouter_model: str | None = Field(default=None, max_length=200, pattern=r"^[\w.\-]+/[\w.\-:~]+$")
+    openrouter_key: str | None = Field(default=None, max_length=300)
+    stress: Literal["garble", "loop"] | None = None
     gpu: str | None = None
     speculative: Literal["auto", "none", "ngram", "eagle3", "mtp", "draft_model", "custom"] = "auto"
     speculative_custom: str | None = None
@@ -82,6 +86,7 @@ def create_app() -> FastAPI:
             "providers": provs,
             "gpus": [{"id": k, **v} for k, v in GPUS.items()],
             "hf_token_set": bool(hf_token()),
+            "openrouter_key_set": bool(orp.api_key()),
             "speculative_modes": [
                 {"id": "auto", "label": "Baseline (as served)", "hint": "No speculative decoding — measures the model as-is."},
                 {"id": "ngram", "label": "N-gram (prompt lookup)", "hint": "Works for every model."},
@@ -102,22 +107,56 @@ def create_app() -> FastAPI:
             out.append(d)
         return out
 
+    @app.get("/api/openrouter/models")
+    async def openrouter_models(refresh: bool = False) -> dict[str, Any]:
+        models, live = await orp.fetch_models(force=refresh)
+        featured = {f["id"] for f in orp.FEATURED}
+        return {"live": live, "count": len(models), "featured": [f["id"] for f in orp.FEATURED if any(m["id"] == f["id"] for m in models)] or sorted(featured),
+                "models": models}
+
+    @app.get("/api/openrouter/status")
+    async def openrouter_status() -> dict[str, Any]:
+        """Is a key configured, and does OpenRouter accept it? (never returns the key itself)"""
+        import httpx
+
+        key = orp.api_key()
+        if not key:
+            return {"configured": False, "valid": None}
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.get(f"{orp.base_url()}/key", headers={"Authorization": f"Bearer {key}"})
+        except httpx.HTTPError as e:
+            return {"configured": True, "valid": None, "error": f"Cannot reach OpenRouter: {e}"}
+        if r.status_code != 200:
+            return {"configured": True, "valid": False, "error": f"HTTP {r.status_code}"}
+        d = (r.json() or {}).get("data") or {}
+        limit, usage = d.get("limit"), d.get("usage")
+        return {"configured": True, "valid": True, "free_tier": d.get("is_free_tier"), "usage": usage, "limit": limit,
+                "remaining": (limit - usage) if (limit is not None and usage is not None) else None}
+
     @app.get("/api/tasks")
     def tasks() -> list[dict[str, Any]]:
         return [t.public() for t in build_suite()]
 
     @app.post("/api/runs", status_code=201)
     async def create_run(req: RunRequest) -> dict[str, Any]:
-        if not req.model_id and not req.custom_model:
-            raise HTTPException(422, "Provide model_id or custom_model.")
+        if not req.model_id and not req.custom_model and not req.openrouter_model:
+            raise HTTPException(422, "Provide model_id, custom_model or openrouter_model.")
         opts = req.model_dump(exclude_none=True)
-        opts["provider"] = req.provider or default_provider()
+        opts["provider"] = "openrouter" if req.openrouter_model and not req.provider else (req.provider or default_provider())
+        if opts["provider"] == "openrouter":
+            if not req.openrouter_model:
+                raise HTTPException(422, "Choose an OpenRouter model.")
+            if not orp.api_key(req.openrouter_key):
+                raise HTTPException(400, "No OpenRouter API key. Set OPENROUTER_API_KEY on the server or enter a key in Run options.")
+            if req.speculative not in ("auto", "none"):
+                raise HTTPException(422, "Speculative decoding can't be configured on a hosted API. Use the Modal provider to test it.")
         if opts["provider"] == "openai" and not (req.endpoint and req.endpoint.base_url):
             raise HTTPException(422, "The custom-endpoint provider needs an endpoint base_url.")
         from .providers import get_provider
 
         ok, why = get_provider(opts["provider"]).available()
-        if not ok:
+        if not ok and not (opts["provider"] == "openrouter" and req.openrouter_key):
             raise HTTPException(400, why)
         try:
             h = manager.create(opts)

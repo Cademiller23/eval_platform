@@ -123,6 +123,27 @@ def analyze(info: dict[str, Any], before: str | None, after: str | None, behavio
                          "text": f"{ratio:.0%} of stream chunks carried more than one token ({tpc:.2f} tokens/chunk on average)"
                                  + (" — bursty arrival typical of draft-and-verify decoding." if behaviour_positive else " — steady one-token-per-step arrival of plain autoregressive decoding.")})
 
+    # ---- hosted APIs: the engine is a black box and gateways re-batch SSE chunks, so burstiness proves nothing
+    if info.get("hosted"):
+        for e in evidence:
+            if e["source"] == "behavior":
+                e["positive"] = None
+                e["text"] += " Not conclusive on a hosted API: gateways and providers buffer and re-chunk streams."
+        evidence.append({"source": "provider", "positive": None,
+                         "text": "Hosted API — the serving engine, its launch flags and metrics are not visible. Some providers do use speculative decoding; "
+                                 "only the provider can confirm it."})
+        eligible = []
+        if model.get("open_weights") or model.get("mtp_native"):
+            if model.get("mtp_native"):
+                eligible.append({"method": "mtp", "repo": None, "note": "Model ships native multi-token-prediction layers.", "verified": True})
+            eligible += list(model.get("speculators") or [])
+        return {
+            "status": "unknown", "headline": "Speculative decoding can't be observed on a hosted API", "confidence": 0.15,
+            "method": None, "config": None, "evidence": evidence, "drafts": None, "draft_tokens": None, "accepted_tokens": None,
+            "acceptance_rate": None, "mean_accepted_length": None, "multi_token_chunk_ratio": ratio, "tokens_per_chunk": tpc,
+            "eligible": eligible, "native_mtp": bool(model.get("mtp_native")), "hosted": True,
+        }
+
     # ---- verdict
     if metrics_positive:
         status, conf = "active", 0.97

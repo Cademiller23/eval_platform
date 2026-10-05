@@ -42,6 +42,14 @@ BENCH_PROMPTS = [
 ]
 
 
+# Decoding "stress controls": deliberately break the model's sampling so a checker can confirm the detectors
+# fire on real model output ("garble": temperature 2 → word salad; "loop": negative penalties → repetition).
+STRESS = {
+    "garble": {"temperature": 2.0, "extra": {"top_p": 1.0}},
+    "loop": {"temperature": 0.0, "extra": {"frequency_penalty": -2.0, "presence_penalty": -2.0, "repetition_penalty": 0.3}},
+}
+
+
 class RunCancelled(Exception):
     pass
 
@@ -85,6 +93,12 @@ def resolve_speculative(model: dict[str, Any], mode: str | None, custom_json: st
 
 
 def resolve_model(options: dict[str, Any]) -> dict[str, Any]:
+    if options.get("openrouter_model"):
+        from .providers import openrouter_provider as orp
+
+        slug = options["openrouter_model"].strip()
+        meta = next((m for m in (orp._cache["models"] or []) if m["id"] == slug), None)
+        return catalog.openrouter_model(slug, meta)
     if options.get("custom_model"):
         cm = options["custom_model"]
         return catalog.custom_model(cm["hf_repo"], cm.get("params_b"), cm.get("reasoning"))
@@ -112,6 +126,12 @@ class Runner:
         self.behaviour = {"chunks": 0, "multi": 0, "tokens": 0}
         self._last_tps_emit = 0.0
 
+    @staticmethod
+    def _endpoint(opts: dict[str, Any]) -> dict[str, Any] | None:
+        if opts.get("provider") == "openrouter":
+            return {"api_key": opts.get("openrouter_key"), "model": opts.get("openrouter_model")}
+        return opts.get("endpoint")
+
     # ------------------------------------------------------------------ events
     def log(self, level: str, message: str) -> None:
         self._emit({"type": "log", "level": level, "message": message, "ts": now_iso()})
@@ -128,6 +148,10 @@ class Runner:
         extra = {}
         if self.model.get("chat_template_kwargs"):
             extra["chat_template_kwargs"] = self.model["chat_template_kwargs"]
+        stress = STRESS.get(self.options.get("stress") or "")
+        if stress:
+            temperature = stress["temperature"]
+            extra.update(stress["extra"])
         t_start = time.perf_counter()
         state = {"tokens": 0, "t0": None}
 
@@ -168,8 +192,13 @@ class Runner:
         spec = LaunchSpec(
             model=model, gpu=gpu, speculative_config=spec_cfg, max_model_len=max_len, dtype=opts.get("dtype") or "auto",
             quantization=opts.get("quantization") or None, hf_token=hf_token(),
-            endpoint=opts.get("endpoint"), speculative_label=spec_label,
+            endpoint=self._endpoint(opts), speculative_label=spec_label,
         )
+        if self.provider.name == "openrouter" and spec_cfg:
+            raise ValueError("Speculative decoding cannot be configured on a hosted API — pick Modal to test it.")
+        if opts.get("stress"):
+            self.log("warn", f"Stress control '{opts['stress']}' active: decoding is deliberately broken ({STRESS[opts['stress']]}). "
+                             "Scores are expected to drop — this verifies that the detectors fire.")
         quick = bool(opts.get("quick"))
         suite = build_suite(self.settings.haystack_tokens, max_len, quick)
         self.log("info", f"Evaluating {model['name']} ({model['hf_repo']}) — {len(suite)} tests{' (quick mode)' if quick else ''}.")
@@ -225,6 +254,9 @@ class Runner:
                 if vals:
                     copy_ratios[d] = sum(vals) / len(vals)
             spec_report["copy_ratio_by_domain"] = {k: round(v, 3) for k, v in copy_ratios.items()}
+            usage = self.session.run_summary() if self.session else {}
+            if usage.get("providers_seen"):
+                info["providers_seen"] = usage["providers_seen"]
             recs = recommendations.build(model, info, self.perf, spec_report, coh, doms, ok_tests, opts, copy_ratios)
             report = {
                 "run_id": self.run_id,
@@ -242,6 +274,7 @@ class Runner:
                 "speculative": spec_report,
                 "tests": self.tests,
                 "recommendations": recs,
+                "usage": usage,
             }
             self.phase("analysis", "done", f"{scores['overall']:.0f}/100 · {verdict['title']}")
             return report
@@ -289,7 +322,7 @@ class Runner:
         ttft_long = r.ttft_s * 1000 if (r.ttft_s is not None and not r.error) else None
 
         # concurrency
-        n = 8
+        n = max(2, min(8, getattr(self.session, "max_concurrency", None) or 8))
         results = await asyncio.gather(*[
             self.chat([{"role": "user", "content": BENCH_PROMPTS[i % 3] + f" (variation {i})"}], max_tokens=128, temperature=0.0, meta={"seed": f"conc{i}"})
             for i in range(n)
@@ -358,7 +391,8 @@ class Runner:
             self.phase(domain, "skipped")
             return
         self.phase(domain, "running", f"{len(tasks)} tests")
-        sem = asyncio.Semaphore(self.settings.suite_concurrency)
+        cap = getattr(self.session, "max_concurrency", None) or 99
+        sem = asyncio.Semaphore(max(1, min(self.settings.suite_concurrency, cap)))
         done = 0
         self.progress(domain, 0, len(tasks))
 
@@ -435,12 +469,14 @@ def _public_options(opts, spec_label, spec_cfg, gpu, max_len) -> dict[str, Any]:
     return {
         "provider": opts.get("provider"), "gpu": gpu, "speculative": spec_label, "speculative_config": spec_cfg,
         "quick": bool(opts.get("quick")), "max_model_len": max_len, "temperature": opts.get("temperature") or 0.0,
-        "parent_run_id": opts.get("parent_run_id"),
+        "parent_run_id": opts.get("parent_run_id"), "stress": opts.get("stress") or None,
+        "openrouter_model": opts.get("openrouter_model"),
         "endpoint": ({"base_url": opts["endpoint"].get("base_url"), "model": opts["endpoint"].get("model")} if opts.get("endpoint") else None),
     }
 
 
 def _public_env(info: dict[str, Any], spec: LaunchSpec) -> dict[str, Any]:
     keys = ["provider", "engine", "engine_version", "gpu", "gpu_names", "gpu_count", "requested_gpu", "max_model_len", "dtype", "quantization",
-            "speculative_config", "cold_start_s", "provision_s", "wall_provision_s", "command", "simulated", "base_url", "served_model"]
+            "speculative_config", "cold_start_s", "provision_s", "wall_provision_s", "command", "simulated", "base_url", "served_model",
+            "hosted", "open_weights", "hf_id", "pricing", "free_tier", "providers_seen", "behavior_unreliable"]
     return {k: info.get(k) for k in keys if k in info}

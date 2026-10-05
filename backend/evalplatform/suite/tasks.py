@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from .sandbox import run_tests
-from .text import extract_code, extract_final_number, fold_accents, split_thinking, word_count
+from .text import extract_code, extract_final_number, fold_accents, nfc, split_thinking, word_count
 
 
 @dataclass
@@ -92,6 +92,8 @@ def math_grader(expected: float, tol: float = 0.01) -> Grader:
         if got is None:
             return Grade([Check("final answer present", False, "No number found in the answer.")], 0.0)
         ok = abs(got - expected) <= max(tol, abs(expected) * 1e-9)
+        if not ok and 0 < abs(expected) <= 1 and "%" in text:  # "16.7%" is a correct probability
+            ok = abs(got / 100 - expected) <= max(tol, 1e-9)
         return Grade([Check("correct final answer", ok, f"expected {expected:g}, got {got:g}")])
     return grade
 
@@ -237,11 +239,11 @@ def valid_parentheses(s):
                 return False
     return not stack
 """,
-          [_case("simple", 'assert valid_parentheses("()") and valid_parentheses("()[]{}")'),
-           _case("mismatch", 'assert not valid_parentheses("(]") and not valid_parentheses("([)]")'),
-           _case("nested", 'assert valid_parentheses("{[]}")'),
+          [_case("simple", 'assert valid_parentheses("()") is True and valid_parentheses("()[]{}") is True'),
+           _case("mismatch", 'assert valid_parentheses("(]") is False and valid_parentheses("([)]") is False'),
+           _case("nested", 'assert valid_parentheses("{[]}") is True'),
            _case("empty", 'assert valid_parentheses("") is True'),
-           _case("unbalanced", 'assert not valid_parentheses("((") and not valid_parentheses("]")')], skill="stacks"),
+           _case("unbalanced", 'assert valid_parentheses("((") is False and valid_parentheses("]") is False')], skill="stacks"),
     _code("lru", "LRU cache", "LRUCache",
           "Implement a Python class `LRUCache` with `__init__(self, capacity: int)`, `get(self, key) -> int` (returns -1 if the key is missing) and `put(self, key, value) -> None`. When capacity is exceeded evict the least recently used key. Both `get` and `put` count as a use.",
           """
@@ -321,8 +323,8 @@ def _strip(text: str) -> str:
 
 
 def _contains(text: str, *needles: str, any_of: bool = False) -> bool:
-    low = text.lower()
-    hits = [n.lower() in low for n in needles]
+    low = nfc(text).lower()
+    hits = [nfc(n).lower() in low for n in needles]
     return any(hits) if any_of else all(hits)
 
 
@@ -389,6 +391,14 @@ def contains_grader(*needles: str, any_of: bool = False, label: str = "correct a
     return grade
 
 
+def regex_grader(pattern: str, label: str = "correct answer", flags: int = re.I) -> Grader:
+    rx = re.compile(pattern, flags)
+
+    def grade(text: str, ctx: GradeCtx) -> Grade:
+        return Grade([Check(label, bool(rx.search(_strip(text))), f"expected a match for /{pattern}/")])
+    return grade
+
+
 def g_syllogism(text: str, ctx: GradeCtx) -> Grade:
     t = _strip(text).strip().lower()
     return Grade([Check("answers Yes", re.match(r"^\W*yes\b", t) is not None),
@@ -431,11 +441,11 @@ GENERAL_TASKS = [
     Task("gen-author", "general", "Author of Pride and Prejudice", user("Who wrote the novel 'Pride and Prejudice'? Answer in one short sentence."),
          contains_grader("austen", label="names Jane Austen"), "Pride and Prejudice was written by Jane Austen.", max_tokens=80, expect_short=True, text_kind="short", skill="world knowledge", difficulty="easy"),
     Task("gen-gold", "general", "Chemical symbol for gold", user("What is the chemical symbol for gold? Answer in one short sentence."),
-         contains_grader("au", label="symbol Au"), "The chemical symbol for gold is Au.", max_tokens=80, expect_short=True, text_kind="short", skill="science knowledge", difficulty="easy"),
+         regex_grader(r"\bAu\b", label="symbol Au", flags=0), "The chemical symbol for gold is Au.", max_tokens=80, expect_short=True, text_kind="short", skill="science knowledge", difficulty="easy"),
     Task("gen-logic", "general", "Syllogism", user("If all bloops are razzies and all razzies are lazzies, are all bloops definitely lazzies? Begin your answer with Yes or No, then explain in one sentence."),
          g_syllogism, "Yes. Since every bloop is a razzie and every razzie is a lazzie, every bloop must be a lazzie.", max_tokens=150, skill="logical reasoning", difficulty="easy", quick=True),
     Task("gen-order", "general", "Ordering puzzle", user("Alice is taller than Bob. Bob is taller than Carol. Dave is shorter than Carol. Who is the shortest? Answer with just the name."),
-         contains_grader("dave", label="Dave is shortest"), "Dave", max_tokens=100, expect_short=True, text_kind="short", skill="logical reasoning", difficulty="medium"),
+         regex_grader(r"\bdave\b", label="Dave is shortest"), "Dave", max_tokens=100, expect_short=True, text_kind="short", skill="logical reasoning", difficulty="medium"),
     Task("gen-summary", "general", "One-sentence summary", user("Summarise the following paragraph in a single sentence of at most 30 words.\n\n" + HAYSTACK_SUMMARY),
          g_summary, "Falling renewable costs, especially solar paired with cheaper battery storage, are pushing grids away from fossil fuels.", max_tokens=150, skill="summarisation", difficulty="medium"),
     Task("gen-translate", "general", "Translate to Spanish", user("Translate into Spanish: \"Good morning, how are you?\" Reply with just the translation."),

@@ -31,8 +31,8 @@ def split_thinking(text: str) -> tuple[str, str, bool]:
     return visible.strip(), "\n".join(thinking_parts).strip(), unterminated
 
 
-_CODE_FENCE = re.compile(r"```(?:python|py|Python)?\s*\n(.*?)```", re.S)
-_OPEN_FENCE = re.compile(r"```(?:python|py|Python)?\s*\n(.*)$", re.S)
+_CODE_FENCE = re.compile(r"```[A-Za-z0-9_+.\-]*[ \t]*\n(.*?)```", re.S)
+_OPEN_FENCE = re.compile(r"```[A-Za-z0-9_+.\-]*[ \t]*\n(.*)$", re.S)
 
 
 def extract_code(text: str) -> str | None:
@@ -76,15 +76,16 @@ def extract_final_number(text: str) -> float | None:
         n = _NUM_RE.search(m[-1])
         if n:
             return _to_number(n.group(0))
-    ans = list(re.finditer(r"answer\s*(?:is)?\s*[:=]?\s*\**", visible, flags=re.I))
-    if ans:
-        rest = visible[ans[-1].end():][:80]
-        frac = re.search(r"\\frac\{(\d+)\}\{(\d+)\}", rest)
+    # Walk "answer" mentions from the last to the first until one is followed by a number; a trailing
+    # "let me know if you want another answer" must not hide the real final answer.
+    for m_ans in reversed(list(re.finditer(r"answer\s*(?:is)?\s*[:=]?\s*\**", visible, flags=re.I))):
+        rest = visible[m_ans.end():][:80]
+        frac = re.search(r"^\W{0,6}\\frac\{(\d+)\}\{(\d+)\}", rest)
         if frac:
             return int(frac.group(1)) / int(frac.group(2))
-        n = _NUM_RE.search(rest)
+        n = re.match(r"\W{0,12}?(" + _NUM + ")", rest)
         if n:
-            v = _to_number(n.group(0))
+            v = _to_number(n.group(1))
             if v is not None:
                 return v
     nums = _NUM_RE.findall(visible)
@@ -109,3 +110,23 @@ def fold_accents(text: str) -> str:
 
     decomposed = unicodedata.normalize("NFKD", text.lower())
     return "".join(c for c in decomposed if not unicodedata.combining(c))
+
+
+def nfc(text: str) -> str:
+    import unicodedata
+
+    return unicodedata.normalize("NFC", text)
+
+
+_LATEX = re.compile(r"\$\$.*?\$\$|\\\[.*?\\\]|\\\(.*?\\\)|(?<![\w$])\$(?=[^\s$])[^$\n]{1,200}?(?<=[^\s$])\$(?![\w$])", re.S)
+_FENCED = re.compile(r"```.*?(?:```|$)", re.S)
+_INLINE_CODE = re.compile(r"`[^`\n]+`")
+_URL = re.compile(r"https?://\S+|www\.\S+")
+
+
+def strip_markup(text: str) -> str:
+    """Remove code, LaTeX and URLs so prose heuristics only judge the natural-language part."""
+    t = _FENCED.sub(" ", text)
+    t = _INLINE_CODE.sub(" ", t)
+    t = _LATEX.sub(" ", t)
+    return _URL.sub(" ", t)

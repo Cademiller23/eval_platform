@@ -102,6 +102,8 @@ def rank_methods(model: dict[str, Any], copy_ratios: dict[str, float]) -> list[d
 
 def speculative_plan(model: dict[str, Any], info: dict[str, Any], spec: dict[str, Any], perf: dict[str, Any],
                      options: dict[str, Any], copy_ratios: dict[str, float]) -> dict[str, Any]:
+    if info.get("hosted"):
+        return _hosted_speculative_plan(model, info, spec, perf, options, copy_ratios)
     max_len = int(info.get("max_model_len") or options.get("max_model_len") or 8192)
     gpu_name, gpu_n = parse_gpu(info.get("requested_gpu") or options.get("gpu") or model.get("min_gpu"))
     gpu_n = max(gpu_n, int(info.get("gpu_count") or 1))
@@ -191,6 +193,37 @@ def speculative_plan(model: dict[str, Any], info: dict[str, Any], spec: dict[str
     }
 
 
+def _hosted_speculative_plan(model, info, spec, perf, options, copy_ratios) -> dict[str, Any]:
+    slug = model.get("openrouter_slug") or model["name"]
+    tps = perf.get("decode_tps_median")
+    if not model.get("open_weights"):
+        return {
+            "status": spec["status"], "recommended": None, "apply": None, "methods": [],
+            "summary": (f"{model['name']} is a closed-weights model served by its vendor. Speculative decoding, batching and quantisation "
+                        "are entirely the provider's decision — there is nothing to configure or implement on your side."),
+            "steps": [
+                _step("What you can influence", "You cannot add speculative decoding to a closed model, but you can choose faster routing and shorter outputs:", None),
+                _step("Prefer the fastest route", "OpenRouter can sort providers by throughput or latency (or use the :nitro variant of a model).",
+                      f"client.chat.completions.create(\n    model=\"{slug}\",\n    messages=[...],\n    extra_body={{\"provider\": {{\"sort\": \"throughput\"}}}},\n)", "python"),
+                _step("Reduce tokens", "Wall-clock time is mostly output length ÷ tok/s: lower max_tokens, ask for concise answers, and avoid reasoning variants for simple routes.", None),
+            ],
+        }
+    # open weights: the user can self-host and *does* control speculation → reuse the full recipe, minus Modal buttons
+    plan = speculative_plan(model, {**info, "hosted": False, "requested_gpu": model.get("min_gpu") or "H100", "max_model_len": 8192, "gpu_count": 1},
+                            {**spec, "status": "not_detected", "config": None}, perf, {**options, "gpu": model.get("min_gpu") or "H100"}, copy_ratios)
+    base = f"{tps:.0f} tok/s" if tps else "the measured speed"
+    plan["status"] = spec["status"]
+    plan["apply"] = None
+    plan["summary"] = ("Whether the provider uses speculative decoding can't be observed through an API — some do, some don't. "
+                       f"{model['name']} is open-weight, so you can control it by self-hosting: "
+                       + (f"with {plan['methods'][0]['title']} a self-hosted instance could plausibly beat {base} at low concurrency." if plan["methods"] else "see the recipe below."))
+    for st in plan["steps"]:
+        if st["title"].startswith("Measure the gain"):
+            st["body"] = ("Switch the provider to Modal in Run options, pick this model and the method above (“Try it now” on the method card), "
+                          "and compare tok/s and coherency against this hosted run.")
+    return plan
+
+
 def _step(title: str, body: str, code: str | None, lang: str = "text") -> dict[str, Any]:
     return {"title": title, "body": body, "code": code, "lang": lang if code else None}
 
@@ -198,7 +231,52 @@ def _step(title: str, body: str, code: str | None, lang: str = "text") -> dict[s
 # ----------------------------------------------------------------------------------------
 # Speed
 # ----------------------------------------------------------------------------------------
+def hosted_speed_recommendations(model, info, perf) -> list[dict[str, Any]]:
+    recs: list[dict[str, Any]] = []
+    slug = model.get("openrouter_slug") or model["name"]
+    tps, ttft, ttft_long = perf.get("decode_tps_median"), perf.get("ttft_ms_p50"), perf.get("ttft_long_ms")
+    provs = info.get("providers_seen") or {}
+    prov_txt = ", ".join(f"{k} ×{v}" for k, v in provs.items()) or "unknown provider"
+    if tps is not None and tps < 40:
+        recs.append(dict(id="route-fast", title="Route to a faster provider", impact="high", effort="low",
+                         why=f"Measured {tps:.0f} tok/s via {prov_txt} (includes network and provider queueing).",
+                         detail="OpenRouter can pick the highest-throughput provider for you, or you can use the `:nitro` variant of a model. Throughput differs several-fold between providers of the same model.",
+                         code=f"extra_body={{\"provider\": {{\"sort\": \"throughput\"}}}}   # or model=\"{slug}:nitro\""))
+    if ttft is not None and ttft > 700:
+        recs.append(dict(id="route-latency", title="Optimise time-to-first-token", impact="medium", effort="low",
+                         why=f"Median TTFT {ttft:.0f} ms" + (f", {ttft_long:.0f} ms for a ~1.5k-token prompt." if ttft_long else "."),
+                         detail="Sort providers by latency, keep long system prompts stable so providers can cache them, and stream responses so users see tokens immediately.",
+                         code="extra_body={\"provider\": {\"sort\": \"latency\"}}"))
+    if len(provs) > 1:
+        recs.append(dict(id="pin-provider", title="Pin a provider for consistent speed and quality", impact="medium", effort="low",
+                         why=f"Requests were served by {len(provs)} different providers ({prov_txt}).",
+                         detail="Providers differ in quantisation, context limits and speed. For reproducible behaviour pin one and disable fallbacks.",
+                         code=f"extra_body={{\"provider\": {{\"order\": [\"{next(iter(provs))}\"], \"allow_fallbacks\": False}}}}"))
+    if model.get("reasoning"):
+        recs.append(dict(id="think", title="Cap reasoning effort", impact="high", effort="low",
+                         why="Reasoning models spend most tokens thinking, multiplying latency and cost.",
+                         detail="Lower the effort (or exclude reasoning) on routes that do not need it.",
+                         code="extra_body={\"reasoning\": {\"effort\": \"low\"}}"))
+    if info.get("free_tier") or (info.get("pricing") or {}).get("prompt_per_m") == 0:
+        recs.append(dict(id="free-limits", title="Free models are rate-limited", impact="low", effort="n/a",
+                         why="Free endpoints share capacity and enforce strict request limits.",
+                         detail="Expect slower, burstier speed than the paid variant; do not use free routes for latency-sensitive production.", code=None))
+    if model.get("open_weights"):
+        recs.append(dict(id="selfhost", title="Self-host for full control of speed", impact="medium", effort="high",
+                         why="Open-weight model: you control quantisation, batching and speculative decoding yourself.",
+                         detail="Evaluate it on Modal with this platform (FP8 / speculative decoding) and compare tok/s and quality against the hosted numbers.", code=None))
+    if not recs:
+        recs.append(dict(id="hosted-ok", title="Speed looks healthy for a hosted endpoint", impact="info", effort="n/a",
+                         why=f"{tps:.0f} tok/s, TTFT {ttft or 0:.0f} ms via {prov_txt}." if tps else "Speed measured.",
+                         detail="Numbers include network and provider queueing, so treat them as the service you would actually get.", code=None))
+    order = {"high": 0, "medium": 1, "low": 2, "info": 3}
+    recs.sort(key=lambda r: order.get(r["impact"], 4))
+    return recs
+
+
 def speed_recommendations(model: dict[str, Any], info: dict[str, Any], perf: dict[str, Any], spec: dict[str, Any], options: dict[str, Any]) -> list[dict[str, Any]]:
+    if info.get("hosted"):
+        return hosted_speed_recommendations(model, info, perf)
     recs: list[dict[str, Any]] = []
     gpu_key = info.get("gpu") or match_gpu((info.get("gpu_names") or [None])[0])
     gpu_name, gpu_n = parse_gpu(info.get("requested_gpu") or options.get("gpu"))
@@ -354,6 +432,22 @@ _ALIASES = {"tail_loop": "repetition", "line_loop": "repetition", "compressible_
             "control_chars": "gibberish_words"}
 
 
+HOSTED_OVERRIDES = {
+    "special_token_leak": dict(
+        detail="Special tokens in the text mean a provider is mis-applying the chat template or stop tokens. This is a provider bug, not the model — route to a different provider and report it.",
+        code="extra_body={\"provider\": {\"order\": [\"Together\", \"Fireworks\"], \"allow_fallbacks\": True, \"ignore\": [\"<offending provider>\"]}}"),
+    "gibberish_words": dict(
+        detail="Garbled language through a hosted API is very often one provider serving an aggressively quantised or buggy build. Require high-precision providers, lower the temperature, and compare providers one by one.",
+        code="extra_body={\"provider\": {\"quantizations\": [\"bf16\", \"fp16\", \"fp8\"], \"require_parameters\": True}}\ntemperature=0.3"),
+    "runaway_generation": dict(
+        detail="Short-answer prompts ran to the token limit: a provider is not honouring the model's end-of-turn token, or you are calling a base model. Pin another provider or pass explicit stop sequences.",
+        code="stop=[\"<|eot_id|>\", \"<|im_end|>\"]   # model-specific end-of-turn markers"),
+    "empty_output": dict(
+        detail="Empty completions from a hosted model usually mean a provider error, a content filter, or a too-small max_tokens budget when the model reasons first. Retry on another provider and raise max_tokens.",
+        code="extra_body={\"provider\": {\"allow_fallbacks\": True}}\nmax_tokens=2048"),
+}
+
+
 def coherence_recommendations(model: dict[str, Any], info: dict[str, Any], coh: dict[str, Any], doms: dict[str, Any], tests: list[dict[str, Any]]) -> list[dict[str, Any]]:
     recs: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -366,6 +460,8 @@ def coherence_recommendations(model: dict[str, Any], info: dict[str, Any], coh: 
         advice = ISSUE_ADVICE.get(key)
         if not isinstance(advice, dict):
             continue
+        if info.get("hosted") and key in HOSTED_OVERRIDES:
+            advice = {**advice, **HOSTED_OVERRIDES[key]}
         # count only major/critical (or all for minor-only kinds)
         related = [k for k, v in coh["issue_kinds"].items() if _ALIASES.get(k, k) == key]
         ids = sorted({tid for k in related for tid in coh["issue_kinds"][k]["tests"]})
@@ -411,7 +507,12 @@ def coherence_recommendations(model: dict[str, Any], info: dict[str, Any], coh: 
                              why=f"{d.title()} score {doms[d]['score']:.0f}/100 — failed: {', '.join(failed[:6])}{'…' if len(failed) > 6 else ''}.",
                              detail=detail, code=code))
 
-    if info.get("dtype") in ("float16", "half") or (info.get("gpu") == "T4" and coh["garble_rate"] > 0):
+    if info.get("hosted") and info.get("providers_seen") and coh["severe_rate"] > 0.04:
+        provs = ", ".join(f"{k} ×{v}" for k, v in info["providers_seen"].items())
+        recs.append(dict(id="provider-attribution", title="Check which provider served the bad responses", impact="medium", severity="minor",
+                         why=f"Providers seen: {provs}.", detail="Re-run with a single provider pinned (provider.order + allow_fallbacks=false) to find out whether the problem is the model or one provider's deployment.",
+                         code=None))
+    if (not info.get("hosted")) and (info.get("dtype") in ("float16", "half") or (info.get("gpu") == "T4" and coh["garble_rate"] > 0)):
         recs.append(dict(id="dtype", title="Prefer bfloat16", impact="high", severity="major",
                          why=f"Serving dtype is {info.get('dtype')}.", detail="float16 has a much smaller dynamic range and overflows in several architectures, producing NaNs/garbage. Use bfloat16 on Ampere or newer.", code="vllm serve MODEL --dtype bfloat16"))
 

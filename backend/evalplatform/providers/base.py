@@ -65,6 +65,11 @@ class Session(ABC):
     """A live, ready-to-query model."""
 
     info: dict[str, Any]
+    max_concurrency: int | None = None   # hosted APIs cap parallel requests (rate limits)
+
+    def run_summary(self) -> dict[str, Any]:
+        """Provider-side totals for the finished run (cost, providers seen, ...)."""
+        return {}
 
     @abstractmethod
     def stream(self, messages: list[dict[str, Any]], *, max_tokens: int, temperature: float,

@@ -20,7 +20,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
-from .text import split_thinking
+from .text import split_thinking, strip_markup
 
 SEVERITY_WEIGHT = {"minor": 0.25, "major": 0.7, "critical": 1.0}
 
@@ -47,6 +47,8 @@ SPECIAL_TOKEN_PATTERNS = [
 _SPECIAL_RE = re.compile("|".join(SPECIAL_TOKEN_PATTERNS))
 _MOJIBAKE_RE = re.compile(r"Ã[\u0080-¿]|â€[™œ”“¦\u009d]|Â[ -¿]|ï¿½")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_EMOJI = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200d\u2190-\u21FF\u2300-\u23FF\u25A0-\u25FF\u2022\u00B7\u00D7\u00F7\u00B0\u00B1]")
+_PUNCT_EXTRA = re.compile("[\u3000-\u303f\uff00-\uffef\u00a1\u00bf\u00ab\u00bb\u2018-\u201f\u2030-\u205e\u0964\u0965\u060c\u061b\u061f]")
 _NON_LATIN_LETTER = re.compile(r"[Ѐ-ӿ֐-׿؀-ۿऀ-ॿ฀-๿぀-ヿ㐀-䶿一-鿿가-힯]")
 
 
@@ -160,7 +162,7 @@ def analyze_text(
     rep_chars = full.count("�")
     h.metrics["replacement_chars"] = rep_chars
     if rep_chars:
-        sev = "major" if rep_chars >= 4 else "minor"
+        sev = "major" if rep_chars >= 3 else "minor"
         issues.append(Issue("replacement_chars", sev, f"{rep_chars} Unicode replacement character(s) (�) — broken byte-level decoding or corrupted logits.", rep_chars))
     moj = len(_MOJIBAKE_RE.findall(full))
     if moj >= 2:
@@ -179,18 +181,19 @@ def analyze_text(
     letters = [c for c in body if c.isalpha()]
     nonlatin = len(_NON_LATIN_LETTER.findall(body))
 
-    if len(body) >= 200 and kind == "prose":
-        ent = char_entropy(body)
+    if len(strip_markup(body)) >= 200 and kind == "prose":
+        ent = char_entropy(strip_markup(body))
         h.metrics["char_entropy"] = ent
         if ent > 5.4:
             issues.append(Issue("random_chars", "major", f"Character entropy {ent:.2f} bits is far above natural language (~4.2) — output looks like random characters.", ent))
 
-    if kind == "prose" and len(body) >= 40:
-        allowed = set(".,;:!?'\"()-_/%$&@#*[]{}<>=+~`’“”—–…\n\t ")
-        weird = sum(1 for c in body if not (c.isalnum() or c in allowed))
-        ratio = weird / max(1, len(body))
+    prose = strip_markup(body) if kind in ("prose", "short") else body
+    if kind == "prose" and len(prose) >= 40:
+        allowed = set(".,;:!?'\"()-_/%$&@#*[]{}<>=+~`’“”—–…|\n\t ")
+        weird = sum(1 for c in _PUNCT_EXTRA.sub("", _EMOJI.sub("", prose)) if not (c.isalnum() or c in allowed))
+        ratio = weird / max(1, len(prose))
         h.metrics["symbol_ratio"] = ratio
-        if ratio > 0.15 and not multilingual:
+        if ratio > 0.15:
             issues.append(Issue("symbol_soup", "major", f"{ratio:.0%} of characters are unusual symbols.", ratio))
 
     if not multilingual and letters and nonlatin >= 3:
@@ -200,9 +203,20 @@ def analyze_text(
             issues.append(Issue("language_drift", "major" if frac > 0.10 else "minor",
                                 f"{frac:.0%} of letters are non-Latin script in an English task (language drift).", frac))
 
+    # ---- language-agnostic soup: tokens that interleave letters and digits ("wbÅ8j1f207k5zf")
+    if kind in ("prose", "short") and len(prose) >= 20:
+        ptoks = [t for t in re.findall(r"\S+", prose) if len(t) >= 8 and not re.search(r"[-./_\\]", t)]
+        def _flips(t: str) -> int:
+            return sum(1 for a, b in zip(t, t[1:]) if (a.isdigit() and b.isalpha()) or (a.isalpha() and b.isdigit()))
+        soup = [t for t in ptoks if _flips(t) >= 3]
+        total_toks = max(1, len(prose.split()))
+        h.metrics["mixed_alnum_tokens"] = len(soup)
+        if len(soup) >= 2 or (len(soup) == 1 and len(prose) < 80 and len(soup[0]) >= 12):
+            issues.append(Issue("random_chars", "major", f"{len(soup)} token(s) interleave letters and digits like random characters (e.g. '{soup[0][:24]}').", len(soup) / total_toks))
+
     # ---- word level -----------------------------------------------------------------------
     if kind in ("prose", "short") and not multilingual:
-        toks = re.findall(r"[A-Za-z][A-Za-z'’\-]*", body)
+        toks = re.findall(r"[A-Za-z][A-Za-z'’\-]*", prose)
         long_toks = [t for t in toks if len(t) >= 3]
         if len(long_toks) >= 8:
             bad = [t for t in long_toks if _bad_word(t)]
@@ -219,7 +233,9 @@ def analyze_text(
                 issues.append(Issue("low_word_coverage", "major", f"Only {cov:.0%} of words are common English function words (natural prose is ~35-50%) — text is not coherent English.", cov))
             elif cov < 0.20:
                 issues.append(Issue("low_word_coverage", "minor", f"Common-word coverage is low ({cov:.0%}).", cov))
-        giant = [t for t in re.findall(r"\S+", body) if len(t) > 45 and not t.startswith(("http", "www", "/", "```"))]
+        # CJK/Thai text has no spaces, so only ASCII-dominant strings can be "giant tokens"
+        giant = [t for t in re.findall(r"\S+", prose)
+                 if len(t) > 45 and not t.startswith(("http", "www", "/", "```")) and sum(ord(c) < 128 for c in t) / len(t) > 0.8]
         if giant:
             issues.append(Issue("giant_token", "minor", f"{len(giant)} unbroken string(s) over 45 chars (e.g. '{giant[0][:30]}…').", len(giant)))
 

@@ -34,7 +34,7 @@ class RunHandle:
         return {
             "id": self.id, "status": self.status, "created_at": self.created_at, "started_at": self.started_at,
             "finished_at": self.finished_at, "error": self.error, "model": self.model,
-            "options": {k: v for k, v in self.options.items() if k not in ("endpoint",)},
+            "options": {k: v for k, v in self.options.items() if k not in ("endpoint", "openrouter_key")},
             "scores": rep.get("scores"), "verdict": (rep.get("verdict") or {}).get("label"),
             "decode_tps": (rep.get("performance") or {}).get("decode_tps_median"),
             "speculative_status": (rep.get("speculative") or {}).get("status"),
