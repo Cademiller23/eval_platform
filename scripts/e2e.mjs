@@ -130,9 +130,9 @@ await step("compare mode: 3 models → leaderboard, radar, takeaways", async () 
   await page.waitForFunction(() => document.querySelectorAll("table.cmp tbody tr").length === 3, null, { timeout: 180000 });
   const t = await page.textContent("body");
   expect(t.includes("Takeaways") && t.includes("Leaderboard"), "compare sections missing");
-  const firstRow = await page.locator("table.cmp tbody tr").first().textContent();
+  const firstRow = (await page.locator("table.cmp tbody tr").first().textContent()).toLowerCase();
   expect(!firstRow.includes("tiny"), "the emulated weak model must not rank first");
-  const lastRow = await page.locator("table.cmp tbody tr").last().textContent();
+  const lastRow = (await page.locator("table.cmp tbody tr").last().textContent()).toLowerCase();
   expect(lastRow.includes("tiny"), "the emulated weak model should rank last");
 });
 await step("history selection → compare button", async () => {

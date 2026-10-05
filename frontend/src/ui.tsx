@@ -210,9 +210,18 @@ export function Segmented<T extends string>({ options, value, onChange, label }:
   );
 }
 
+const SPEC_NAMES: Record<string, string> = { ngram: "N-gram", eagle3: "EAGLE-3", eagle: "EAGLE", mtp: "Native MTP", draft_model: "Draft model", custom: "Custom" };
+
+/** How a run was configured, in a few words ("baseline", "EAGLE-3", "self-check: garble") — tells apart runs of the same model. */
+export function variantLabel(o: { speculative?: string; stress?: string | null; provider?: string }): string {
+  if (o.stress) return `self-check: ${o.stress}`;
+  if (o.provider !== "openrouter" && o.speculative && o.speculative !== "auto" && o.speculative !== "none") return SPEC_NAMES[o.speculative] ?? o.speculative;
+  return "baseline";
+}
+
 /** iOS switch. */
-export function Switch({ on, onChange, label }: { on: boolean; onChange: (v: boolean) => void; label: string }) {
-  return <button type="button" role="switch" aria-checked={on} aria-label={label} className={`switch ${on ? "on" : ""}`} onClick={() => onChange(!on)} />;
+export function Switch({ on, onChange, label, disabled }: { on: boolean; onChange: (v: boolean) => void; label: string; disabled?: boolean }) {
+  return <button type="button" role="switch" aria-checked={on} aria-label={label} disabled={disabled} className={`switch ${on ? "on" : ""}`} onClick={() => onChange(!on)} />;
 }
 
 export interface RadarSeries { label: string; color: string; values: number[] }

@@ -53,6 +53,8 @@ export function Report({ run }: { run: RunFull }) {
   const s = r.scores;
   const canRerun = r.options.provider !== "openai";
   const apply = r.recommendations.speculative.apply;
+  const passedTests = r.tests.filter((t) => t.passed).length;
+  const passRate = r.tests.length ? (100 * passedTests) / r.tests.length : 0;
 
   return (
     <>
@@ -97,7 +99,7 @@ export function Report({ run }: { run: RunFull }) {
         <h2>Scores</h2>
         <div className="row" style={{ alignItems: "stretch" }}>
           <div style={{ flex: "1 1 520px" }}>
-            <div className="grid3" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(128px,1fr))" }}>
+            <div className="score-grid">
               {([["coherency", "Coherency", "shield"], ["coding", "Coding", "code"], ["math", "Math", "calc"], ["general", "General", "chat"], ["performance", "Speed", "bolt"]] as const).map(([k, label, ic]) => {
                 const val = s[k];
                 const d = r.domains[k];
@@ -106,13 +108,19 @@ export function Report({ run }: { run: RunFull }) {
                     <div className="lbl"><span>{label}</span><Icon name={ic} size={15} /></div>
                     <div className="val" style={{ color: scoreColor(val) }}>{Math.round(val)}</div>
                     <Bar value={val} />
-                    <div className="faint" style={{ fontSize: 12, marginTop: 8 }}>{d ? `${d.passed}/${d.total} tests passed` : k === "performance" ? `${fmt(r.performance.decode_tps_median, 0)} tok/s` : ""}</div>
+                    <div className="note faint">{d ? `${d.passed}/${d.total} tests passed` : k === "performance" ? `${fmt(r.performance.decode_tps_median, 0)} tok/s decode` : ""}</div>
                   </div>
                 );
               })}
+              <div className="card score-card">
+                <div className="lbl"><span>Pass rate</span><Icon name="check" size={15} /></div>
+                <div className="val" style={{ color: scoreColor(passRate) }}>{Math.round(passRate)}<small>%</small></div>
+                <Bar value={passRate} />
+                <div className="note faint">{passedTests} of {r.tests.length} tests overall</div>
+              </div>
             </div>
           </div>
-          <div className="card" style={{ flex: "0 1 340px", display: "grid", placeItems: "center" }}>
+          <div className="card" style={{ flex: "1 1 300px", maxWidth: 380, display: "grid", placeItems: "center" }}>
             <Radar axes={[
               { label: "Coherency", value: s.coherency }, { label: "Coding", value: s.coding }, { label: "Math", value: s.math },
               { label: "General", value: s.general }, { label: "Speed", value: s.performance },
@@ -218,10 +226,10 @@ export function Report({ run }: { run: RunFull }) {
       <div className="section">
         <h2>Coherency analysis</h2>
         <div className="card">
-          <div className="grid4" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))" }}>
+          <div className="coh-grid">
             {([
               ["Clean responses", r.coherency.clean_ratio, true], ["Garbled language", r.coherency.garble_rate, false], ["Repetition loops", r.coherency.repetition_rate, false],
-              ["Special-token leaks", r.coherency.special_token_leak_rate, false], ["Runaway / never-stops", r.coherency.runaway_rate, false], ["Empty answers", r.coherency.empty_rate, false],
+              ["Special-token leaks", r.coherency.special_token_leak_rate, false], ["Runaway output", r.coherency.runaway_rate, false], ["Empty answers", r.coherency.empty_rate, false],
             ] as const).map(([label, val, good]) => (
               <div key={label}>
                 <div className="label-s">{label}</div>

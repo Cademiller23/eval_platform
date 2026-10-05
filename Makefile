@@ -1,4 +1,4 @@
-.PHONY: setup build start demo dev test e2e verify replay deploy-modal clean
+.PHONY: setup build start demo preview fixtures dev test e2e verify replay deploy-modal clean
 
 PY ?= python3
 
@@ -14,6 +14,12 @@ start: build      ## build the UI and serve everything on http://localhost:8000
 
 demo: build       ## same, but force the simulated provider (no GPU / credentials)
 	EVAL_DEFAULT_PROVIDER=mock $(PY) -m evalplatform
+
+preview:          ## build the offline interactive preview -> docs/coherence-lab-preview.html (double-click to open, no server)
+	cd frontend && npm run build:demo
+
+fixtures:         ## re-record the preview's data with the real platform (a few minutes, no network or credentials needed)
+	PYTHONPATH=backend $(PY) scripts/build_demo_fixtures.py
 
 dev:              ## API with auto-reload + Vite dev server on :5173
 	EVAL_CORS_ORIGINS=http://localhost:5173 $(PY) -m evalplatform --reload & cd frontend && npm run dev
@@ -34,4 +40,4 @@ deploy-modal:     ## (optional) pre-deploy the GPU serving app; the platform als
 	$(PY) -m modal deploy modal_app/serve.py
 
 clean:
-	rm -rf frontend/dist data .pytest_cache
+	rm -rf frontend/dist frontend/dist-demo data .pytest_cache

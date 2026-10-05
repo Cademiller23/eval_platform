@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "build:demo": "tsc --noEmit && vite build --mode demo && node ../scripts/make_demo_page.mjs"
   },
   "dependencies": {
     "react": "^19.0.0",

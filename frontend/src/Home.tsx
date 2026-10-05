@@ -114,7 +114,7 @@ export function Home() {
     ...(stress ? [`self-check: ${stress}`] : []),
   ].join(" · ");
 
-  const eta = isOR ? "1 to 4 minutes" : provider === "mock" ? "under a minute" : quick ? "3 to 8 minutes" : "5 to 15 minutes";
+  const eta = isOR ? "about 1 to 4 minutes" : provider === "mock" ? "under a minute" : quick ? "about 3 to 8 minutes" : "about 5 to 15 minutes";
 
   return (
     <>
@@ -130,13 +130,13 @@ export function Home() {
           loading={isOR && orLoading}
           disabled={!cfg}
           multi={multi}
-          searchPlaceholder={isOR ? "Search OpenRouter, or paste any model slug (vendor/model)" : "Search models, or paste any Hugging Face repo (org/name)"}
+          searchPlaceholder={isOR ? "Search, or paste vendor/model" : "Search, or paste a Hugging Face org/name"}
           customPattern={isOR ? /^~?[\w.-]+\/[\w.:~-]+$/ : /^[\w.-]+\/[\w.-]+$/}
           customLabel={isOR ? "Evaluate OpenRouter model" : "Evaluate custom model"}
           placeholder={isOR ? "Choose an OpenRouter model to evaluate" : "Choose a model to evaluate"}
           footer={isOR ? "Choosing a model starts the evaluation through OpenRouter" : undefined}
         />
-        <div className="hint-line">{multi ? "Compare mode: tick up to 4 models, then start them together" : "Choosing a model starts the evaluation straight away"} · about {eta}{isOR ? " · cost depends on the model (prices are in the list)" : ""}</div>
+        <div className="hint-line">{multi ? "Compare mode: tick up to 4 models, then start them together" : "Choosing a model starts the evaluation straight away"} · {IS_DEMO ? "a recorded run plays back in about half a minute" : eta}{isOR ? " · cost depends on the model (prices are in the list)" : ""}</div>
 
         <div className="opts">
           <button className="opts-toggle" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
@@ -168,13 +168,13 @@ export function Home() {
                       <div className="cell">
                         <div className="text">
                           <div className="label">API key</div>
-                          <div className="hint">Found in OPENROUTER_API_KEY on the server.</div>
+                          <div className="hint">{IS_DEMO ? "Not needed in the preview." : "Found in OPENROUTER_API_KEY on the server."}</div>
                         </div>
                         <div className="ctrl key-row">
                           {orStatus && (orStatus.valid
                             ? <span className="muted" style={{ fontSize: 13 }}>Valid{orStatus.remaining != null ? ` · $${orStatus.remaining.toFixed(2)} left` : orStatus.limit == null ? " · no spend limit" : ""}</span>
                             : <span style={{ color: "var(--red-ink)", fontSize: 13 }}>{orStatus.error ?? "Key rejected"}</span>)}
-                          <button className="btn small" onClick={checkKey}>Check key</button>
+                          {!IS_DEMO && <button className="btn small" onClick={checkKey}>Check key</button>}
                         </div>
                       </div>
                     ) : (
@@ -207,9 +207,9 @@ export function Home() {
                       <div className="cell">
                         <div className="text">
                           <div className="label">GPU</div>
-                          <div className="hint">Decode speed is memory-bandwidth bound: more GB/s, more tokens/s.</div>
+                          <div className="hint">{IS_DEMO ? "The preview uses each model's recommended GPU." : "Decode speed is memory-bandwidth bound: more GB/s, more tokens/s."}</div>
                         </div>
-                        <select className="select ctrl" value={gpu} onChange={(e) => setGpu(e.target.value)} aria-label="GPU">
+                        <select className="select ctrl" value={gpu} onChange={(e) => setGpu(e.target.value)} aria-label="GPU" disabled={IS_DEMO}>
                           <option value="">Recommended</option>
                           {cfg.gpus.map((g) => <option key={g.id} value={g.id}>{g.id} · {g.mem_gb} GB</option>)}
                           <option value="H100:2">H100 × 2</option><option value="H100:4">H100 × 4</option><option value="H200:2">H200 × 2</option><option value="H200:8">H200 × 8</option>
@@ -239,8 +239,8 @@ export function Home() {
                 <div className="sheet-title">Evaluation</div>
                 <div className="group">
                   <div className="cell">
-                    <div className="text"><div className="label">Quick mode</div><div className="hint">{cfg.suite.quick} representative tests instead of {cfg.suite.full}. Same pipeline, faster result.</div></div>
-                    <div className="ctrl"><Switch on={quick} onChange={setQuick} label="Quick mode" /></div>
+                    <div className="text"><div className="label">Quick mode</div><div className="hint">{IS_DEMO ? "Every recording in the preview is a full run." : `${cfg.suite.quick} representative tests instead of ${cfg.suite.full}. Same pipeline, faster result.`}</div></div>
+                    <div className="ctrl"><Switch on={quick} onChange={setQuick} label="Quick mode" disabled={IS_DEMO} /></div>
                   </div>
                   <div className="cell">
                     <div className="text"><div className="label">Compare several models</div><div className="hint">Tick up to 4 models and get a side-by-side leaderboard.</div></div>
@@ -249,9 +249,9 @@ export function Home() {
                   <div className="cell">
                     <div className="text">
                       <div className="label">Detector self-check</div>
-                      <div className="hint">Deliberately breaks decoding on the same model to prove that garbling and loops get flagged. Scores are expected to drop.</div>
+                      <div className="hint">Deliberately breaks decoding on the same model to prove that garbling and loops get flagged. Scores are expected to drop.{IS_DEMO && " In the preview, run it on OpenRouter models."}</div>
                     </div>
-                    <select className="select ctrl" value={stress} onChange={(e) => setStress(e.target.value as "" | "garble" | "loop")} aria-label="Detector self-check">
+                    <select className="select ctrl" value={stress} onChange={(e) => setStress(e.target.value as "" | "garble" | "loop")} aria-label="Detector self-check" disabled={IS_DEMO && !isOR}>
                       <option value="">Off</option>
                       <option value="garble">Garble (temperature 2.0)</option>
                       <option value="loop">Loops (negative penalties)</option>
@@ -290,7 +290,7 @@ export function Home() {
             {IS_DEMO && (
               <div className="banner">
                 <Icon name="spark" size={18} />
-                <div><b>This is an interactive preview.</b> It runs the real interface against recorded results, with no server attached. Pick any model to watch a full evaluation play out.</div>
+                <div><b>This is an interactive preview.</b> It runs the real interface against recorded results, with no server attached. Speeds, prices and providers are simulated. Pick any model to watch a full evaluation play out.</div>
               </div>
             )}
             {err && <div className="banner err" role="alert"><Icon name="alert" size={18} /><div>{err}</div></div>}
@@ -343,10 +343,11 @@ export function RunRow({ r, selected, onToggle }: { r: RunSummary; selected?: bo
             {providerLabel(r.options.provider)} · {r.options.stress ? `self-check: ${r.options.stress}` : r.options.speculative && r.options.speculative !== "auto" ? `speculative: ${r.options.speculative}` : "baseline"} · {timeAgo(r.created_at)}
           </div>
         </div>
-        <div>
+        <div className="status-cell">
           {live ? <Badge tone="violet"><span className="spinner" style={{ width: 10, height: 10 }} /> Running</Badge>
             : r.status === "completed" ? <Badge tone={verdictTone(r.verdict)}>{r.verdict === "ready" ? "Ready" : r.verdict === "caution" ? "Caution" : "Not ready"}</Badge>
             : <Badge tone="red">{r.status}</Badge>}
+          {r.scores && <div className="m-score num" style={{ color: scoreColor(r.scores.overall) }}>{Math.round(r.scores.overall)} / 100</div>}
         </div>
         <div className="num" style={{ color: r.scores ? scoreColor(r.scores.overall) : "var(--text-3)", fontWeight: 600 }}>{r.scores ? `${Math.round(r.scores.overall)} / 100` : "—"}</div>
         <div className="num muted">{r.decode_tps ? `${fmt(r.decode_tps, 0)} tok/s` : "—"}</div>

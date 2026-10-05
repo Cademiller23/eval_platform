@@ -84,7 +84,7 @@ export default function App() {
             Coherence Lab
           </Link>
           <nav className="nav" aria-label="Main">
-            {IS_DEMO && <span className="badge cyan" title="Recorded sample data, no server attached">Interactive preview</span>}
+            {IS_DEMO && <span className="badge cyan" title="Recorded sample data, no server attached"><span className="hide-sm">Interactive preview</span><span className="only-sm">Preview</span></span>}
             {!IS_DEMO && prov && <span className="pill status-pill"><span className={`dot ${prov.available ? "green" : "amber"}`} /> {prov.label}</span>}
             <Link className="pill link" to="/history"><Icon name="history" size={15} /> History</Link>
             {!IS_DEMO && (

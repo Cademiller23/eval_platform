@@ -3,9 +3,9 @@ import { Link, useSearchParams } from "react-router-dom";
 import { api } from "./api";
 import { providerLabel } from "./Home";
 import type { RunFull } from "./types";
-import { Badge, MultiRadar, SERIES_COLORS, fmt, scoreColor, verdictTone } from "./ui";
+import { Badge, MultiRadar, SERIES_COLORS, fmt, scoreColor, variantLabel, verdictTone } from "./ui";
 
-type Col = { key: string; label: string; get: (r: RunFull) => number | null; fmt: (v: number) => string; best: "max" | "min" };
+type Col = { key: string; label: string; hint?: string; get: (r: RunFull) => number | null; fmt: (v: number) => string; best: "max" | "min" };
 
 const COLS: Col[] = [
   { key: "overall", label: "Overall", get: (r) => r.report?.scores.overall ?? null, fmt: (v) => v.toFixed(1), best: "max" },
@@ -13,10 +13,10 @@ const COLS: Col[] = [
   { key: "coding", label: "Coding", get: (r) => r.report?.scores.coding ?? null, fmt: (v) => v.toFixed(0), best: "max" },
   { key: "math", label: "Math", get: (r) => r.report?.scores.math ?? null, fmt: (v) => v.toFixed(0), best: "max" },
   { key: "general", label: "General", get: (r) => r.report?.scores.general ?? null, fmt: (v) => v.toFixed(0), best: "max" },
-  { key: "tps", label: "Decode tok/s", get: (r) => r.report?.performance.decode_tps_median ?? null, fmt: (v) => v.toFixed(0), best: "max" },
-  { key: "ttft", label: "TTFT p50 (ms)", get: (r) => r.report?.performance.ttft_ms_p50 ?? null, fmt: (v) => v.toFixed(0), best: "min" },
+  { key: "tps", label: "Tok/s", hint: "Decode tokens per second (median)", get: (r) => r.report?.performance.decode_tps_median ?? null, fmt: (v) => v.toFixed(0), best: "max" },
+  { key: "ttft", label: "TTFT (ms)", hint: "Time to first token, median", get: (r) => r.report?.performance.ttft_ms_p50 ?? null, fmt: (v) => v.toFixed(0), best: "min" },
   { key: "cost", label: "Run cost", get: (r) => r.report?.usage?.cost_usd ?? null, fmt: (v) => `$${v < 0.1 ? v.toFixed(4) : v.toFixed(2)}`, best: "min" },
-  { key: "clean", label: "Clean output", get: (r) => (r.report ? r.report.coherency.clean_ratio * 100 : null), fmt: (v) => `${v.toFixed(0)}%`, best: "max" },
+  { key: "clean", label: "Clean", hint: "Share of responses with no garbling, loops or leaked tokens", get: (r) => (r.report ? r.report.coherency.clean_ratio * 100 : null), fmt: (v) => `${v.toFixed(0)}%`, best: "max" },
 ];
 
 export function Compare() {
@@ -45,6 +45,28 @@ export function Compare() {
   const sorted = [...done].sort((a, b) => (b.report!.scores.overall) - (a.report!.scores.overall));
   const color = (id: string) => SERIES_COLORS[ids.indexOf(id) % SERIES_COLORS.length];
 
+  // Runs of the same model (say baseline vs EAGLE-3) must be distinguishable everywhere they appear.
+  const labels = useMemo(() => {
+    const count = (f: (r: RunFull) => string) => {
+      const m = new Map<string, number>();
+      runs.forEach((r) => m.set(f(r), (m.get(f(r)) ?? 0) + 1));
+      return m;
+    };
+    const byName = count((r) => r.model.name);
+    const withVariant = (r: RunFull) => ((byName.get(r.model.name) ?? 0) > 1 ? `${r.model.name} · ${variantLabel(r.options)}` : r.model.name);
+    const byVariant = count(withVariant);
+    const seen = new Map<string, number>();
+    const out = new Map<string, string>();
+    runs.forEach((r) => {
+      const base = withVariant(r);
+      const n = (seen.get(base) ?? 0) + 1;
+      seen.set(base, n);
+      out.set(r.id, (byVariant.get(base) ?? 0) > 1 ? `${base} (${n})` : base);
+    });
+    return out;
+  }, [runs]);
+  const label = (r: RunFull) => labels.get(r.id) ?? r.model.name;
+
   const bestOf = (c: Col) => {
     const vals = sorted.map((r) => c.get(r)).filter((v): v is number => v != null);
     if (vals.length < 2) return null;
@@ -54,7 +76,7 @@ export function Compare() {
   const insights = (() => {
     if (sorted.length < 2) return [];
     const out: string[] = [];
-    const name = (r: RunFull) => r.model.name;
+    const name = label;
     const col = (k: string) => COLS.find((c) => c.key === k)!;
     // all runs within `eps` of the best value (so ties are reported as ties, not as a winner)
     const leaders = (c: Col, dir: "max" | "min", eps: number) => {
@@ -103,7 +125,7 @@ export function Compare() {
               return (
                 <Link key={r.id} to={`/runs/${r.id}`} className="card" style={{ display: "block" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                    <b>{r.model.name}</b>
+                    <b>{label(r)}</b>
                     {r.status === "completed" ? <Badge tone="green">done</Badge> : r.status === "failed" ? <Badge tone="red">failed</Badge> : <Badge tone="violet"><span className="spinner" style={{ width: 10, height: 10 }} /> running</Badge>}
                   </div>
                   <div className="bar" style={{ margin: "14px 0 8px" }}><i style={{ width: `${(donePh / r.phases.length) * 100}%`, background: color(r.id) }} /></div>
@@ -122,18 +144,19 @@ export function Compare() {
             <div className="card" style={{ padding: 0, overflow: "hidden" }}>
               <div className="scroll-x">
                 <table className="table cmp">
-                  <thead><tr><th>#</th><th className="model">Model</th><th>Verdict</th>{COLS.map((c) => <th key={c.key}>{c.label}</th>)}</tr></thead>
+                  <thead><tr><th>#</th><th className="model">Model</th><th className="v-col">Verdict</th>{COLS.map((c) => <th key={c.key} title={c.hint}>{c.label}</th>)}</tr></thead>
                   <tbody>
                     {sorted.map((r, i) => (
                       <tr key={r.id}>
                         <td className="num muted">{i + 1}</td>
                         <td className="model">
                           <Link to={`/runs/${r.id}`} style={{ fontWeight: 650, display: "flex", gap: 9, alignItems: "center" }}>
-                            <span className="swatch" style={{ background: color(r.id) }} />{r.model.name}
+                            <span className="swatch" style={{ background: color(r.id) }} />{label(r)}
                           </Link>
-                          <div className="faint" style={{ fontSize: 11.5, marginLeft: 19 }}>{providerLabel(r.options.provider)}{r.options.stress ? ` · stress: ${r.options.stress}` : ""}</div>
+                          <div className="faint" style={{ fontSize: 11.5, marginLeft: 19 }}>{providerLabel(r.options.provider)} · {variantLabel(r.options)}</div>
+                          <div className="v-inline"><Badge tone={verdictTone(r.report!.verdict.label)}>{r.report!.verdict.title}</Badge></div>
                         </td>
-                        <td><Badge tone={verdictTone(r.report!.verdict.label)}>{r.report!.verdict.title}</Badge></td>
+                        <td className="v-col"><Badge tone={verdictTone(r.report!.verdict.label)}>{r.report!.verdict.title}</Badge></td>
                         {COLS.map((c) => {
                           const v = c.get(r);
                           const best = bestOf(c);
@@ -154,11 +177,11 @@ export function Compare() {
 
           <div className="section">
             <h2>Profile</h2>
-            <div className="row" style={{ alignItems: "center" }}>
+            <div className="row" style={{ alignItems: "flex-start" }}>
               <div className="card" style={{ flex: "0 1 420px", display: "grid", placeItems: "center" }}>
                 <MultiRadar axes={["Coherency", "Coding", "Math", "General", "Speed"]}
-                  series={sorted.map((r) => ({ label: r.model.name, color: color(r.id), values: [r.report!.scores.coherency, r.report!.scores.coding, r.report!.scores.math, r.report!.scores.general, r.report!.scores.performance] }))} />
-                <div className="legend">{sorted.map((r) => <span key={r.id}><i style={{ background: color(r.id) }} />{r.model.name}</span>)}</div>
+                  series={sorted.map((r) => ({ label: label(r), color: color(r.id), values: [r.report!.scores.coherency, r.report!.scores.coding, r.report!.scores.math, r.report!.scores.general, r.report!.scores.performance] }))} />
+                <div className="legend">{sorted.map((r) => <span key={r.id}><i style={{ background: color(r.id) }} />{label(r)}</span>)}</div>
               </div>
               <div className="card" style={{ flex: "1 1 320px" }}>
                 <h3>Takeaways</h3>

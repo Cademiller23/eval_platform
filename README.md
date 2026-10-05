@@ -15,12 +15,37 @@ its output more coherent.
                                                                                                      └ coherency fixes
 ```
 
+## See it first (no install, no server)
+
+`docs/coherence-lab-preview.html` is the real interface running against **recorded runs** — double-click it. Pick any
+of the 21 catalogue models (or switch *Run on* to OpenRouter), watch a full evaluation play out, open the report,
+re-run with a speculative-decoding recipe, tick runs in *History* and compare them. Everything in it was produced by the
+platform itself (`scripts/build_demo_fixtures.py` records 68 real `Runner` executions: the simulated demo provider for
+every catalogue model and every speculative recipe, plus real model answers replayed through the OpenRouter code path,
+including the garble / loop detector self-checks); only the in-browser stand-in for the server is new. Speeds, prices
+and providers in the recordings are simulated, and the page says so.
+
+```bash
+make preview          # rebuilds the page -> docs/coherence-lab-preview.html
+make fixtures         # (optional) re-records the data, a few minutes, no network or credentials
+node scripts/e2e_preview.mjs   # click-through test of the preview in a real browser
+```
+
 ## Quick start
 
 ```bash
 git clone … && cd eval_platform
 ./scripts/start.sh            # installs deps, builds the UI, serves http://localhost:8000
 # or:  make setup && make start
+```
+
+Windows (PowerShell), or if you prefer to see each step:
+
+```powershell
+python -m venv .venv; .\.venv\Scripts\Activate.ps1
+pip install -e ".[modal]"
+cd frontend; npm install; npm run build; cd ..
+python -m evalplatform          # then open http://localhost:8000
 ```
 
 With no credentials the platform starts in **Demo mode** (simulated models — explore the whole UI and report
@@ -119,7 +144,10 @@ Coherency = 60% output cleanliness across all responses + 40% the dedicated cohe
 ## Architecture
 
 ```
-frontend/            React + Vite UI (dropdown, live run view, report)
+frontend/            React + Vite UI in an Apple-style design system (light/dark, tokens in src/styles.css)
+  src/demo/          offline preview: in-browser stand-in for the API + recorded fixtures (npm run build:demo)
+scripts/             start.sh · e2e.mjs (live UI journey) · e2e_preview.mjs · build_demo_fixtures.py · make_demo_page.mjs
+                     verify_openrouter.py · grade_recordings.py · dump_prompts.py
 backend/evalplatform/
   api.py             FastAPI REST + SSE; serves the built UI
   manager.py         run lifecycle, event replay, persistence (data/runs/*.json)
@@ -159,9 +187,17 @@ curl -XPOST localhost:8000/api/runs -H 'content-type: application/json' \
 * Heuristic detectors can false-positive on unusual-but-valid text; every flag is shown with its evidence and the
   raw response so you can judge. The default suite is deliberately small and fast — it is a sanity/regression
   gate, not a replacement for large benchmarks.
-* Tests: `make test` (≈ 200: detectors, graders, sandbox, speculative detection, scoring, API, OpenAI-compatible and
+* Tests: `make test` (227: detectors, graders, sandbox, speculative detection, scoring, API, OpenAI-compatible and
   OpenRouter streaming incl. retries / mid-stream errors / key hygiene, Modal container code against a fake vLLM,
-  real-output grading and mutation tests); `make e2e` for the browser journey; `make verify` for live OpenRouter.
+  real-output grading and mutation tests); `make e2e` for the browser journey against the real server (`node scripts/e2e_preview.mjs` does the same for the offline preview); `make verify` for live OpenRouter.
+
+## Design
+
+The UI follows Apple's interface conventions: the system font stack (SF Pro on Apple devices, a self-hosted Inter
+elsewhere), system colours, hairline separators, a frosted navigation bar, squircle corners, iOS-style segmented
+controls, switches and grouped lists, Fitness-style score rings and a bento grid. It is light by default, follows the OS
+dark setting, and the toggle in the header overrides both. All colours are tokens at the top of
+`frontend/src/styles.css`, so re-theming is a one-block change. It is responsive down to phone width.
 
 ## Configuration
 
