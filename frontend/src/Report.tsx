@@ -24,8 +24,9 @@ export function Report({ run }: { run: RunFull }) {
     setBusy(true); setErr(null);
     try {
       const o = run.options;
+      const serverKey = o.openrouter_model ? (await api.config()).openrouter_key_set : false;
       const target = o.openrouter_model
-        ? { openrouter_model: o.openrouter_model, openrouter_key: savedOpenRouterKey() || undefined }
+        ? { openrouter_model: o.openrouter_model, openrouter_key: serverKey ? undefined : savedOpenRouterKey() || undefined }
         : o.model_id ? { model_id: o.model_id } : { custom_model: o.custom_model };
       const { run_id } = await api.start({
         ...target,

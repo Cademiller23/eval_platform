@@ -16,7 +16,7 @@ demo: build       ## same, but force the simulated provider (no GPU / credential
 	EVAL_DEFAULT_PROVIDER=mock $(PY) -m evalplatform
 
 dev:              ## API with auto-reload + Vite dev server on :5173
-	$(PY) -m evalplatform --reload & cd frontend && npm run dev
+	EVAL_CORS_ORIGINS=http://localhost:5173 $(PY) -m evalplatform --reload & cd frontend && npm run dev
 
 test:             ## run the backend test-suite
 	$(PY) -m pytest -q

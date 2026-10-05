@@ -5,10 +5,13 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -42,7 +45,7 @@ class RunRequest(BaseModel):
     custom_model: CustomModel | None = None
     provider: Literal["modal", "openrouter", "openai", "mock"] | None = None
     openrouter_model: str | None = Field(default=None, max_length=200, pattern=r"^~?[\w.\-]+/[\w.\-:~]+$")
-    openrouter_key: str | None = Field(default=None, max_length=300)
+    openrouter_key: str | None = Field(default=None, max_length=300, pattern=r"^[^\s\x00-\x1f\x7f]*$")
     stress: Literal["garble", "loop"] | None = None
     gpu: str | None = None
     speculative: Literal["auto", "none", "ngram", "eagle3", "mtp", "draft_model", "custom"] = "auto"
@@ -63,6 +66,13 @@ def default_provider() -> str:
     return "modal" if (modal_sdk_installed() and modal_credentials_present()) else "mock"
 
 
+def _safe_key_set() -> bool:
+    try:
+        return bool(orp.api_key())
+    except ValueError:
+        return False
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Model Evaluation Platform", version=__version__)
     # The UI is served from the same origin, so CORS stays off by default — an open policy would let any
@@ -70,6 +80,31 @@ def create_app() -> FastAPI:
     origins = [o.strip() for o in os.environ.get("EVAL_CORS_ORIGINS", "").split(",") if o.strip()]
     if origins:
         app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["*"], allow_headers=["*"])
+    # DNS-rebinding / cross-site protection: this server has no login and can spend money (Modal, OpenRouter), so it
+    # only answers requests addressed to a loopback host name (or one you allow), and rejects state-changing
+    # requests whose Origin is a different site.
+    s = get_settings()
+    extra_hosts = [h.strip() for h in os.environ.get("EVAL_ALLOWED_HOSTS", "").split(",") if h.strip()]
+    allow_any = s.host not in ("127.0.0.1", "localhost", "::1") and not extra_hosts   # deliberately exposed → host names unknowable
+    allowed_hosts = ["*"] if allow_any else ["localhost", "127.0.0.1", "[::1]", "testserver", *extra_hosts]
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
+    allowed_origins = {o for o in origins}
+
+    @app.middleware("http")
+    async def same_origin_only(request: Request, call_next):
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            origin = request.headers.get("origin")
+            if origin and origin not in allowed_origins and urlparse(origin).netloc != request.headers.get("host", ""):
+                return JSONResponse({"detail": "Cross-site request blocked (Origin does not match Host)."}, status_code=403)
+        return await call_next(request)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(_: Request, exc: RequestValidationError):
+        """FastAPI's default 422 body echoes the submitted *values* — which would reflect an API key back.
+        Return only where the problem is and what it is."""
+        errors = [{"loc": list(e.get("loc", [])), "msg": e.get("msg", "invalid"), "type": e.get("type", "value_error")} for e in exc.errors()]
+        return JSONResponse({"detail": errors}, status_code=422)
+
     manager = RunManager()
     app.state.manager = manager
 
@@ -86,7 +121,7 @@ def create_app() -> FastAPI:
             "providers": provs,
             "gpus": [{"id": k, **v} for k, v in GPUS.items()],
             "hf_token_set": bool(hf_token()),
-            "openrouter_key_set": bool(orp.api_key()),
+            "openrouter_key_set": _safe_key_set(),
             "speculative_modes": [
                 {"id": "auto", "label": "Baseline (as served)", "hint": "No speculative decoding — measures the model as-is."},
                 {"id": "ngram", "label": "N-gram (prompt lookup)", "hint": "Works for every model."},
@@ -130,9 +165,8 @@ def create_app() -> FastAPI:
         if r.status_code != 200:
             return {"configured": True, "valid": False, "error": f"HTTP {r.status_code}"}
         d = (r.json() or {}).get("data") or {}
-        limit, usage = d.get("limit"), d.get("usage")
-        return {"configured": True, "valid": True, "free_tier": d.get("is_free_tier"), "usage": usage, "limit": limit,
-                "remaining": (limit - usage) if (limit is not None and usage is not None) else None}
+        return {"configured": True, "valid": True, "free_tier": d.get("is_free_tier"), "usage": d.get("usage"), "limit": d.get("limit"),
+                "remaining": orp.remaining_credit(d)}
 
     @app.get("/api/tasks")
     def tasks() -> list[dict[str, Any]]:
@@ -147,7 +181,11 @@ def create_app() -> FastAPI:
         if opts["provider"] == "openrouter":
             if not req.openrouter_model:
                 raise HTTPException(422, "Choose an OpenRouter model.")
-            if not orp.api_key(req.openrouter_key):
+            try:
+                has_key = bool(orp.api_key(req.openrouter_key))
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
+            if not has_key:
                 raise HTTPException(400, "No OpenRouter API key. Set OPENROUTER_API_KEY on the server or enter a key in Run options.")
             if req.speculative not in ("auto", "none"):
                 raise HTTPException(422, "Speculative decoding can't be configured on a hosted API. Use the Modal provider to test it.")

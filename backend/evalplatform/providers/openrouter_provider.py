@@ -54,8 +54,30 @@ _REASONING_HINT = re.compile(r"(r1|reason|thinking|qwq|o1|o3|o4|deepseek-r)", re
 _cache: dict[str, Any] = {"t": 0.0, "models": None, "base": None}
 
 
+_KEY_OK = re.compile(r"^[^\s\x00-\x1f\x7f]+$")
+
+
 def api_key(explicit: str | None = None) -> str | None:
-    return (explicit or os.environ.get("OPENROUTER_API_KEY") or "").strip() or None
+    """The configured key, or None. A key with embedded whitespace/control characters is rejected: it can only be a
+    mangled paste, and httpx would echo it (inside an exception message) if used as a header value."""
+    key = (explicit or os.environ.get("OPENROUTER_API_KEY") or "").strip()
+    if not key:
+        return None
+    if not _KEY_OK.match(key):
+        raise ValueError("The OpenRouter API key contains whitespace or control characters — re-copy it as one line.")
+    return key
+
+
+def remaining_credit(info: dict[str, Any]) -> float | None:
+    """Credit left on a key. Prefer OpenRouter's own `limit_remaining`; `usage` is all-time spend and the limit may
+    reset daily/weekly/monthly, so `limit - usage` is only valid for keys without a reset period."""
+    rem = info.get("limit_remaining")
+    if rem is not None:
+        return float(rem)
+    limit, used = info.get("limit"), info.get("usage")
+    if limit is not None and used is not None and not info.get("limit_reset"):
+        return float(limit) - float(used)
+    return None
 
 
 def normalize(m: dict[str, Any]) -> dict[str, Any]:
@@ -188,16 +210,21 @@ class OpenRouterProvider(Provider):
             try:
                 r = await c.get(f"{base_url()}/key", headers=headers)
             except httpx.HTTPError as e:
-                raise RuntimeError(f"Cannot reach OpenRouter ({base_url()}): {e}") from e
+                raise RuntimeError(f"Cannot reach OpenRouter ({base_url()}): {type(e).__name__}") from None
             if r.status_code in (401, 403):
                 raise RuntimeError("OpenRouter rejected the API key (HTTP %d). Check OPENROUTER_API_KEY." % r.status_code)
             if r.status_code == 200:
                 key_info = (r.json() or {}).get("data") or {}
-                limit, used = key_info.get("limit"), key_info.get("usage")
-                if limit is not None and used is not None and limit - used <= 0:
+                rem = remaining_credit(key_info)
+                if rem is not None and rem <= 0:
                     raise RuntimeError("This OpenRouter key has no credit left.")
             models, live = await fetch_models(client=c)
         meta = next((m for m in models if m["id"] == slug), None)
+        base_slug = slug.split(":")[0]
+        if meta is None and ":" in slug:   # routing variants (:nitro, :floor, :online, …) are not listed separately
+            meta = next((m for m in models if m["id"] == base_slug), None)
+            if meta:
+                progress("info", f"'{slug}' is a routing variant of '{base_slug}'.")
         if live and meta is None:
             close = difflib.get_close_matches(slug, [m["id"] for m in models], n=4, cutoff=0.5)
             raise ValueError(f"OpenRouter has no model '{slug}'." + (f" Did you mean: {', '.join(close)}?" if close else ""))

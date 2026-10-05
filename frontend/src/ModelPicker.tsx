@@ -56,20 +56,20 @@ export function Picker({ entries, onSelect, disabled, busy, loading, multi, maxM
   const customCandidate = customPattern && customPattern.test(trimmed) && !entries.some((e) => e.id.toLowerCase() === trimmed.toLowerCase()) ? trimmed : null;
 
   type Row = { kind: "custom"; id: string } | { kind: "entry"; entry: Entry };
+  // Display order == keyboard order: groups in insertion order with "★ Featured" pinned first.
+  const groups = useMemo(() => {
+    const g = new Map<string, Entry[]>();
+    filtered.forEach((e) => g.set(e.group, [...(g.get(e.group) ?? []), e]));
+    return [...g.entries()].sort(([a], [b]) => Number(b.startsWith("★")) - Number(a.startsWith("★")));
+  }, [filtered]);
   const rows: Row[] = [
     ...(customCandidate ? [{ kind: "custom" as const, id: customCandidate }] : []),
-    ...filtered.map((entry) => ({ kind: "entry" as const, entry })),
+    ...groups.flatMap(([, es]) => es.map((entry) => ({ kind: "entry" as const, entry }))),
   ];
   useEffect(() => setIdx(0), [q, entries]);
   useEffect(() => {
     list.current?.querySelector<HTMLElement>(".picker-item.active")?.scrollIntoView({ block: "nearest" });
   }, [idx]);
-
-  const groups = useMemo(() => {
-    const g = new Map<string, Entry[]>();
-    filtered.forEach((e) => g.set(e.group, [...(g.get(e.group) ?? []), e]));
-    return [...g.entries()];
-  }, [filtered]);
 
   const finish = (ids: string[], custom?: string) => { setOpen(false); onSelect({ ids, custom }); };
   const toggle = (id: string) => setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : p.length >= maxMulti ? p : [...p, id]));

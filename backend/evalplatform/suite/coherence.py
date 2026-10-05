@@ -208,7 +208,13 @@ def analyze_text(
         ptoks = [t for t in re.findall(r"\S+", prose) if len(t) >= 8 and not re.search(r"[-./_\\]", t)]
         def _flips(t: str) -> int:
             return sum(1 for a, b in zip(t, t[1:]) if (a.isdigit() and b.isalpha()) or (a.isalpha() and b.isdigit()))
-        soup = [t for t in ptoks if _flips(t) >= 3]
+        def _souplike(t: str) -> bool:
+            # hex addresses, git SHAs and model ids (lowercase letters+digits only) are legitimate in technical text;
+            # random-character soup additionally carries symbols / non-ASCII letters or erratic capitalisation
+            if re.fullmatch(r"(?:0x)?[0-9a-fA-F]+", t) or re.fullmatch(r"[a-z0-9]+", t) or re.fullmatch(r"[A-Za-z0-9]+:[0-9a-fA-F]+", t):
+                return False
+            return _flips(t) >= 3 and (bool(re.search(r"[^A-Za-z0-9]", t)) or (any(c.isupper() for c in t) and any(c.islower() for c in t)))
+        soup = [t for t in ptoks if _souplike(t)]
         total_toks = max(1, len(prose.split()))
         h.metrics["mixed_alnum_tokens"] = len(soup)
         if len(soup) >= 2 or (len(soup) == 1 and len(prose) < 80 and len(soup[0]) >= 12):

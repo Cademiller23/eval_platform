@@ -168,6 +168,8 @@ curl -XPOST localhost:8000/api/runs -H 'content-type: application/json' \
 See `.env.example`. Useful variables: `OPENROUTER_API_KEY`, `EVAL_OPENROUTER_BASE_URL`, `EVAL_OPENROUTER_CONCURRENCY`, `EVAL_DEFAULT_PROVIDER`, `EVAL_MODAL_APP`, `EVAL_VLLM_VERSION` (deploy
 time), `EVAL_MODAL_SCALEDOWN`, `EVAL_MODAL_MAX_CONTAINERS`, `EVAL_PORT`, `EVAL_DATA_DIR`, `EVAL_MOCK_PACE`, `EVAL_HOST`, `EVAL_CORS_ORIGINS`.
 
-**Security:** the server has no authentication and can spend money on your Modal account, so it binds to
-`127.0.0.1` and sends no CORS headers by default. Only set `EVAL_HOST=0.0.0.0` behind a trusted network or an
+**Security:** the server has no authentication and can spend money on your Modal/OpenRouter accounts, so it binds to
+`127.0.0.1`, sends no CORS headers, only answers requests addressed to a loopback host name (blocks DNS-rebinding;
+add names via `EVAL_ALLOWED_HOSTS`), rejects state-changing requests from a different Origin (allow a dev frontend with
+`EVAL_CORS_ORIGINS`), never echoes request values in validation errors, and redacts API keys from error messages. Only set `EVAL_HOST=0.0.0.0` behind a trusted network or an
 authenticating reverse proxy.

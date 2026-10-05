@@ -39,6 +39,7 @@ export function Home() {
   const [orModels, setOrModels] = useState<OrModels | null>(null);
   const [orLoading, setOrLoading] = useState(false);
   const [orStatus, setOrStatus] = useState<OrStatus | null>(null);
+  const [orFailed, setOrFailed] = useState(false);
 
   useEffect(() => {
     api.config().then((c) => { setCfg(c); setProvider(c.default_provider); }).catch((e) => setErr(`Cannot reach the API: ${e.message}`));
@@ -50,10 +51,10 @@ export function Home() {
   }, []);
 
   useEffect(() => {
-    if (provider !== "openrouter" || orModels || orLoading) return;
+    if (provider !== "openrouter" || orModels || orLoading || orFailed) return;
     setOrLoading(true);
-    api.openrouterModels().then(setOrModels).catch((e) => setErr(`Could not load OpenRouter models: ${e.message}`)).finally(() => setOrLoading(false));
-  }, [provider, orModels, orLoading]);
+    api.openrouterModels().then(setOrModels).catch((e) => { setOrFailed(true); setErr(`Could not load OpenRouter models: ${e.message}`); }).finally(() => setOrLoading(false));
+  }, [provider, orModels, orLoading, orFailed]);
 
   useEffect(() => { try { orKey ? sessionStorage.setItem(KEY_STORE, orKey) : sessionStorage.removeItem(KEY_STORE); } catch { /* private mode */ } }, [orKey]);
 
@@ -69,7 +70,7 @@ export function Home() {
     const opts: RunOptions = { provider, quick, speculative: isOR ? "auto" : spec };
     if (isOR) {
       opts.openrouter_model = id ?? custom!;
-      if (orKey.trim()) opts.openrouter_key = orKey.trim();
+      if (orKey.trim() && !cfg?.openrouter_key_set) opts.openrouter_key = orKey.trim();
     } else if (id) opts.model_id = id;
     else opts.custom_model = { hf_repo: custom! };
     if (!isOR && gpu) opts.gpu = gpu;
@@ -132,7 +133,7 @@ export function Home() {
           placeholder={isOR ? "Select an OpenRouter model to evaluate" : "Select a model to evaluate"}
           footer={isOR ? "Picking a model starts the evaluation through OpenRouter" : undefined}
         />
-        <div className="hint-line">{multi ? "Compare mode: tick up to 4 models, then start them together" : "Selecting a model starts the evaluation immediately"} · ~{eta}{isOR ? " · typically a few cents" : ""}</div>
+        <div className="hint-line">{multi ? "Compare mode: tick up to 4 models, then start them together" : "Selecting a model starts the evaluation immediately"} · ~{eta}{isOR ? " · cost depends on the model (prices shown in the list)" : ""}</div>
 
         <div className="opts">
           <button className="opts-toggle" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
@@ -243,7 +244,7 @@ export function Home() {
             <div className={`banner ${keyOk ? "" : "warn"}`} style={{ marginTop: 14 }}>
               <Icon name={keyOk ? "bolt" : "key"} size={18} />
               <div>
-                {keyOk ? <><b>Hosted API.</b> Tokens/s and latency include network and provider queueing, and the serving engine is invisible — so speculative decoding can't be observed. Coherency, coding, math and general scores are fully valid.</>
+                {keyOk ? <><b>Hosted API.</b> Tokens/s and latency include network and provider queueing, and the serving engine is invisible — so speculative decoding can't be observed. Quality scores are measured exactly as for any model (hosted providers may serve quantised builds, so results can vary by provider).</>
                   : <><b>OpenRouter key needed.</b> Open <a style={{ textDecoration: "underline", cursor: "pointer" }} onClick={() => setOpen(true)}>Run options</a> and paste a key, or export <span className="mono">OPENROUTER_API_KEY</span> and restart.</>}
                 {orModels && !orModels.live && <div style={{ marginTop: 6 }}><Icon name="alert" size={14} /> Couldn't reach OpenRouter's model list — showing a built-in selection. Any valid slug can still be pasted.</div>}
               </div>

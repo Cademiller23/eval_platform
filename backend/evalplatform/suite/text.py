@@ -76,16 +76,17 @@ def extract_final_number(text: str) -> float | None:
         n = _NUM_RE.search(m[-1])
         if n:
             return _to_number(n.group(0))
-    # Walk "answer" mentions from the last to the first until one is followed by a number; a trailing
-    # "let me know if you want another answer" must not hide the real final answer.
+    # Walk "answer" mentions from the last to the first until one yields a number on the same line; a trailing
+    # "let me know if you want another answer" must not hide the real final answer, and "Answer: x = 12" must
+    # return 12, not a number from the working that follows.
     for m_ans in reversed(list(re.finditer(r"answer\s*(?:is)?\s*[:=]?\s*\**", visible, flags=re.I))):
-        rest = visible[m_ans.end():][:80]
-        frac = re.search(r"^\W{0,6}\\frac\{(\d+)\}\{(\d+)\}", rest)
-        if frac:
+        rest = visible[m_ans.end():].split("\n", 1)[0][:100]
+        frac = re.search(r"\\frac\{(\d+)\}\{(\d+)\}", rest)
+        num = _NUM_RE.search(rest)
+        if frac and (not num or frac.start() <= num.start()):
             return int(frac.group(1)) / int(frac.group(2))
-        n = re.match(r"\W{0,12}?(" + _NUM + ")", rest)
-        if n:
-            v = _to_number(n.group(1))
+        if num:
+            v = _to_number(num.group(0))
             if v is not None:
                 return v
     nums = _NUM_RE.findall(visible)

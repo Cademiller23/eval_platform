@@ -55,6 +55,9 @@ def parse_sse_chunk(obj: dict[str, Any], state: dict[str, Any], t0: float) -> di
             if not state.get("in_reasoning"):
                 state["in_reasoning"] = True
                 reasoning = "<think>" + reasoning
+            if text:   # reasoning and answer in the same delta: close the think block before the answer starts
+                state["in_reasoning"] = False
+                reasoning += "</think>"
             text = reasoning + text
         elif text and state.get("in_reasoning"):
             state["in_reasoning"] = False
@@ -65,7 +68,9 @@ def parse_sse_chunk(obj: dict[str, Any], state: dict[str, Any], t0: float) -> di
             if item.get("logprob") is not None:
                 lp.append(float(item["logprob"]))
         n = 0
-        if usage and usage.get("completion_tokens") is not None:
+        # per-chunk token deltas only make sense when the server sends *continuous* usage; otherwise the
+        # single final usage object (often riding on an empty-content chunk) must not become a fake N-token chunk
+        if usage and state.get("continuous") and usage.get("completion_tokens") is not None:
             total = int(usage["completion_tokens"])
             n = max(0, total - state.get("seen_tokens", 0))
             state["seen_tokens"] = total
@@ -81,6 +86,7 @@ def parse_sse_chunk(obj: dict[str, Any], state: dict[str, Any], t0: float) -> di
 
 
 class OpenAISession(Session):
+    deadline_s = 900.0        # hard overall cap per request (keep-alive comments must not extend it forever)
     max_retries = 0           # retryable HTTP failures are retried only by subclasses that opt in
     wants_logprobs = True
     wants_continuous_usage = True
@@ -120,13 +126,21 @@ class OpenAISession(Session):
     def _on_chunk(self, obj: dict[str, Any], state: dict[str, Any]) -> None:
         """Subclass hook: inspect raw chunk objects (provider names, cost, ...)."""
 
+    def _redact(self, text: str) -> str:
+        """Never let an exception message carry the API key (httpx echoes bad header values verbatim)."""
+        t = re.sub(r"Bearer\s+\S+", "Bearer ***", text)
+        if self.api_key:
+            t = t.replace(self.api_key, "***")
+        return t
+
     # ---- streaming ---------------------------------------------------------------------------
     async def stream(self, messages, *, max_tokens, temperature, meta=None, extra=None) -> AsyncIterator[dict[str, Any]]:
         body = self._request_body(messages, max_tokens, temperature, extra)
+        t_start = time.perf_counter()
         attempt = 0
         while True:
             t0 = time.perf_counter()
-            state: dict[str, Any] = {}
+            state: dict[str, Any] = {"continuous": self.wants_continuous_usage}
             emitted = False
             retry_after: float | None = None
             failure: str | None = None
@@ -164,6 +178,9 @@ class OpenAISession(Session):
                                 obj = json.loads(payload)
                             except json.JSONDecodeError:
                                 continue
+                            if time.perf_counter() - t_start > self.deadline_s:
+                                failure = f"Timed out: request exceeded {int(self.deadline_s)}s overall"
+                                break
                             self._on_chunk(obj, state)
                             ev = parse_sse_chunk(obj, state, t0)
                             if ev and ev.get("error"):
@@ -189,11 +206,11 @@ class OpenAISession(Session):
             retryable = retryable_exc or failure.startswith(tuple(f"HTTP {c}" for c in RETRYABLE)) or bool(chunk_code and int(chunk_code.group(1)) in RETRYABLE)
             can_retry = (not emitted) and attempt < self.max_retries and retryable
             if can_retry:
-                delay = retry_after if retry_after is not None else min(30.0, 1.5 * (2 ** attempt))
+                delay = min(60.0, retry_after) if retry_after is not None else min(30.0, 1.5 * (2 ** attempt))
                 attempt += 1
                 await asyncio.sleep(delay)
                 continue
-            yield {"error": failure}
+            yield {"error": self._redact(failure)}
             return
 
     async def metrics(self) -> str | None:
