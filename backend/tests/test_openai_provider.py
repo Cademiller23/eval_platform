@@ -81,3 +81,27 @@ async def test_http_error_surfaces():
     s = session_for(app)
     r = await s.chat([{"role": "user", "content": "hi"}], max_tokens=5)
     assert r.error and "500" in r.error
+
+
+async def test_early_error_chunk_is_retried_but_midstream_error_is_not():
+    calls = {"n": 0}
+    app = FastAPI()
+
+    @app.post("/v1/chat/completions")
+    async def chat():
+        calls["n"] += 1
+
+        async def gen():
+            if calls["n"] == 1:   # provider hiccup before any token → retryable
+                yield 'data: {"error": {"message": "Provider disconnected", "code": 502}, "choices": [{"finish_reason": "error", "delta": {"content": ""}}]}\n\n'
+                return
+            yield 'data: {"choices": [{"delta": {"content": "fine"}}]}\n\n'
+            yield 'data: {"choices": [{"delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}\n\n'
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    s = session_for(app)
+    s.max_retries = 2
+    r = await s.chat([{"role": "user", "content": "hi"}], max_tokens=5)
+    assert r.error is None and r.text == "fine" and calls["n"] == 2

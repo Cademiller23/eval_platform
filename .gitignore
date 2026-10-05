@@ -8,3 +8,6 @@ data/
 node_modules/
 frontend/dist/
 .DS_Store
+
+# live verification output (may contain model responses and costs)
+verification/openrouter/

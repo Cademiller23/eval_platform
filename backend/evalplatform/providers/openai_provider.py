@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse
@@ -183,7 +184,10 @@ class OpenAISession(Session):
             if failure is None:
                 yield {"done": True, "finish_reason": state.get("finish_reason"), "usage": state.get("usage") or {}, "total_t": time.perf_counter() - t0}
                 return
-            can_retry = (not emitted) and attempt < self.max_retries and (retryable_exc or failure.startswith(tuple(f"HTTP {c}" for c in RETRYABLE)))
+            # an SSE error chunk ("... (code 502)") before any token is as retryable as an HTTP 502
+            chunk_code = re.search(r"\(code (\d{3})\)\s*$", failure)
+            retryable = retryable_exc or failure.startswith(tuple(f"HTTP {c}" for c in RETRYABLE)) or bool(chunk_code and int(chunk_code.group(1)) in RETRYABLE)
+            can_retry = (not emitted) and attempt < self.max_retries and retryable
             if can_retry:
                 delay = retry_after if retry_after is not None else min(30.0, 1.5 * (2 ** attempt))
                 attempt += 1
