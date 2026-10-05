@@ -1,22 +1,44 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ModelInfo } from "./types";
+import type { ModelInfo, OrModel } from "./types";
 import { Badge, Icon, familyColor } from "./ui";
 
-interface Props {
-  models: ModelInfo[];
-  disabled?: boolean;
-  busy?: boolean;
-  onSelect: (sel: { model_id?: string; custom_hf?: string }) => void;
+export interface Entry {
+  id: string;
+  name: string;
+  desc: string;
+  group: string;
+  logo: string;
+  color: string;
+  badges: { text: string; tone?: "green" | "amber" | "red" | "violet" | "cyan" }[];
+  right: string[];
+  search: string;
 }
 
-const HF_RE = /^[\w.\-]+\/[\w.\-]+$/;
+export interface Selection { ids: string[]; custom?: string }
 
-export function ModelPicker({ models, onSelect, disabled, busy }: Props) {
+interface Props {
+  entries: Entry[];
+  placeholder?: string;
+  searchPlaceholder: string;
+  customPattern?: RegExp;
+  customLabel?: string;
+  multi?: boolean;
+  maxMulti?: number;
+  disabled?: boolean;
+  busy?: boolean;
+  loading?: boolean;
+  footer?: string;
+  onSelect: (sel: Selection) => void;
+}
+
+export function Picker({ entries, onSelect, disabled, busy, loading, multi, maxMulti = 4, customPattern, customLabel, placeholder, searchPlaceholder, footer }: Props) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const [idx, setIdx] = useState(0);
+  const [picked, setPicked] = useState<string[]>([]);
   const root = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
+  const list = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const h = (e: MouseEvent) => { if (root.current && !root.current.contains(e.target as Node)) setOpen(false); };
@@ -24,43 +46,53 @@ export function ModelPicker({ models, onSelect, disabled, busy }: Props) {
     return () => document.removeEventListener("mousedown", h);
   }, []);
   useEffect(() => { if (open) setTimeout(() => input.current?.focus(), 30); else setQ(""); }, [open]);
+  useEffect(() => { if (!multi) setPicked([]); }, [multi]);
 
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
-    return models.filter((m) => !s || `${m.name} ${m.hf_repo} ${m.family} ${m.tags.join(" ")}`.toLowerCase().includes(s));
-  }, [models, q]);
-  const customCandidate = HF_RE.test(q.trim()) && !models.some((m) => m.hf_repo.toLowerCase() === q.trim().toLowerCase()) ? q.trim() : null;
+    return entries.filter((e) => !s || e.search.includes(s));
+  }, [entries, q]);
+  const trimmed = q.trim();
+  const customCandidate = customPattern && customPattern.test(trimmed) && !entries.some((e) => e.id.toLowerCase() === trimmed.toLowerCase()) ? trimmed : null;
 
-  const flat: { kind: "custom" | "model"; model?: ModelInfo; repo?: string }[] = [
-    ...(customCandidate ? [{ kind: "custom" as const, repo: customCandidate }] : []),
-    ...filtered.map((m) => ({ kind: "model" as const, model: m })),
+  type Row = { kind: "custom"; id: string } | { kind: "entry"; entry: Entry };
+  const rows: Row[] = [
+    ...(customCandidate ? [{ kind: "custom" as const, id: customCandidate }] : []),
+    ...filtered.map((entry) => ({ kind: "entry" as const, entry })),
   ];
-  useEffect(() => setIdx(0), [q]);
+  useEffect(() => setIdx(0), [q, entries]);
+  useEffect(() => {
+    list.current?.querySelector<HTMLElement>(".picker-item.active")?.scrollIntoView({ block: "nearest" });
+  }, [idx]);
 
   const groups = useMemo(() => {
-    const g = new Map<string, ModelInfo[]>();
-    filtered.forEach((m) => g.set(m.family, [...(g.get(m.family) ?? []), m]));
+    const g = new Map<string, Entry[]>();
+    filtered.forEach((e) => g.set(e.group, [...(g.get(e.group) ?? []), e]));
     return [...g.entries()];
   }, [filtered]);
 
-  const choose = (item: (typeof flat)[number]) => {
-    setOpen(false);
-    if (item.kind === "custom") onSelect({ custom_hf: item.repo });
-    else onSelect({ model_id: item.model!.id });
+  const finish = (ids: string[], custom?: string) => { setOpen(false); onSelect({ ids, custom }); };
+  const toggle = (id: string) => setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : p.length >= maxMulti ? p : [...p, id]));
+  const choose = (row: Row) => {
+    if (row.kind === "custom") return multi ? toggle(row.id) : finish([], row.id);
+    return multi ? toggle(row.entry.id) : finish([row.entry.id]);
   };
   const onKey = (e: React.KeyboardEvent) => {
-    if (e.key === "ArrowDown") { e.preventDefault(); setIdx((i) => Math.min(flat.length - 1, i + 1)); }
+    if (e.key === "ArrowDown") { e.preventDefault(); setIdx((i) => Math.min(rows.length - 1, i + 1)); }
     else if (e.key === "ArrowUp") { e.preventDefault(); setIdx((i) => Math.max(0, i - 1)); }
-    else if (e.key === "Enter" && flat[idx]) { e.preventDefault(); choose(flat[idx]); }
+    else if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && multi && picked.length) { e.preventDefault(); finish(picked); }
+    else if (e.key === "Enter" && rows[idx]) { e.preventDefault(); choose(rows[idx]); }
     else if (e.key === "Escape") setOpen(false);
   };
-  const posOf = (m: ModelInfo) => flat.findIndex((f) => f.model?.id === m.id);
+  const rowIndex = (id: string) => rows.findIndex((r) => (r.kind === "entry" ? r.entry.id === id : false));
+
+  const label = busy ? "Starting evaluation…" : multi && picked.length ? `${picked.length} model${picked.length > 1 ? "s" : ""} selected — open to start` : placeholder ?? "Select a model to evaluate";
 
   return (
     <div className={`picker ${open ? "open" : ""}`} ref={root}>
       <button className="picker-trigger" onClick={() => setOpen((o) => !o)} disabled={disabled || busy} aria-haspopup="listbox" aria-expanded={open}>
-        <span style={{ display: "grid", placeItems: "center", color: "var(--violet)" }}><Icon name={busy ? "refresh" : "flask"} size={22} /></span>
-        <span className="ph">{busy ? "Starting evaluation…" : "Select a model to evaluate"}</span>
+        <span style={{ display: "grid", placeItems: "center", color: "var(--violet)" }}><Icon name={busy || loading ? "refresh" : multi ? "layers" : "flask"} size={22} /></span>
+        <span className="ph" style={multi && picked.length ? { color: "var(--text)" } : undefined}>{label}</span>
         <span className="chev"><Icon name="chev" size={20} /></span>
       </button>
 
@@ -68,46 +100,93 @@ export function ModelPicker({ models, onSelect, disabled, busy }: Props) {
         <div className="picker-menu" role="listbox" onKeyDown={onKey}>
           <div className="picker-search">
             <Icon name="search" size={18} />
-            <input ref={input} value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search models — or paste any Hugging Face repo (org/name)" onKeyDown={onKey} />
-            <span className="faint" style={{ fontSize: 12 }}>{filtered.length} models</span>
+            <input ref={input} value={q} onChange={(e) => setQ(e.target.value)} placeholder={searchPlaceholder} onKeyDown={onKey} aria-label="Search models" />
+            <span className="faint" style={{ fontSize: 12 }}>{loading ? "loading…" : `${filtered.length} models`}</span>
           </div>
-          <div className="picker-list">
+          <div className="picker-list" ref={list}>
             {customCandidate && (
-              <button className={`picker-item ${idx === 0 ? "active" : ""}`} onClick={() => choose(flat[0])}>
+              <button className={`picker-item ${idx === 0 ? "active" : ""}`} onClick={() => choose(rows[0])}>
                 <span className="logo" style={{ background: "var(--grad)" }}>+</span>
                 <span className="meta">
-                  <span className="name">Evaluate custom model</span>
+                  <span className="name">{customLabel ?? "Evaluate custom model"}</span>
                   <span className="desc mono">{customCandidate}</span>
                 </span>
                 <span className="right"><Badge tone="violet">custom</Badge></span>
               </button>
             )}
-            {groups.map(([family, ms]) => (
-              <div key={family}>
-                <div className="picker-group">{family}</div>
-                {ms.map((m) => (
-                  <button key={m.id} className={`picker-item ${posOf(m) === idx ? "active" : ""}`} onClick={() => choose({ kind: "model", model: m })} onMouseEnter={() => setIdx(posOf(m))} role="option">
-                    <span className="logo" style={{ background: familyColor(m.family) }}>{m.family.slice(0, 2)}</span>
-                    <span className="meta">
-                      <span className="name">{m.name}{m.reasoning && <Badge tone="violet">reasoning</Badge>}{m.mtp_native && <Badge tone="cyan">MTP</Badge>}</span>
-                      <span className="desc">{m.description}</span>
-                    </span>
-                    <span className="right">
-                      <Badge>{m.params_b >= 100 ? `${Math.round(m.params_b)}B` : `${+m.params_b.toFixed(1)}B`}{m.active_params_b < m.params_b ? ` · ${+m.active_params_b.toFixed(0)}B act` : ""}</Badge>
-                      <Badge>{m.min_gpu}</Badge>
-                    </span>
-                  </button>
-                ))}
+            {groups.map(([group, es]) => (
+              <div key={group}>
+                <div className="picker-group">{group}</div>
+                {es.map((m) => {
+                  const on = picked.includes(m.id);
+                  return (
+                    <button key={m.id} className={`picker-item ${rowIndex(m.id) === idx ? "active" : ""} ${on ? "picked" : ""}`} onClick={() => choose({ kind: "entry", entry: m })} onMouseEnter={() => setIdx(rowIndex(m.id))} role="option" aria-selected={on}>
+                      {multi && <span className={`cbox ${on ? "on" : ""}`}>{on && <Icon name="check" size={13} stroke={3} />}</span>}
+                      <span className="logo" style={{ background: m.color }}>{m.logo}</span>
+                      <span className="meta">
+                        <span className="name">{m.name}{m.badges.map((b) => <Badge key={b.text} tone={b.tone}>{b.text}</Badge>)}</span>
+                        <span className="desc">{m.desc}</span>
+                      </span>
+                      <span className="right">{m.right.map((r) => <Badge key={r}>{r}</Badge>)}</span>
+                    </button>
+                  );
+                })}
               </div>
             ))}
-            {!flat.length && <div className="picker-empty">No match. Paste a Hugging Face repo id like <span className="mono">mistralai/Mistral-7B-v0.1</span>.</div>}
+            {!rows.length && !loading && <div className="picker-empty">No match.{customPattern ? <> Paste a full id like <span className="mono">org/model-name</span>.</> : null}</div>}
           </div>
           <div className="picker-foot">
-            <span>↑↓ navigate · Enter to start</span>
-            <span>Picking a model boots it and starts the evaluation</span>
+            {multi ? (
+              <>
+                <span>Pick up to {maxMulti} · {picked.length} selected · Ctrl/⌘+Enter to start</span>
+                <button className="btn small primary" disabled={!picked.length} onClick={() => finish(picked)}>Evaluate {picked.length || ""} model{picked.length === 1 ? "" : "s"}</button>
+              </>
+            ) : (
+              <>
+                <span>↑↓ navigate · Enter to start</span>
+                <span>{footer ?? "Picking a model boots it and starts the evaluation"}</span>
+              </>
+            )}
           </div>
         </div>
       )}
     </div>
   );
+}
+
+// ------------------------------------------------------------------ entry builders
+export function catalogEntries(models: ModelInfo[]): Entry[] {
+  return models.map((m) => ({
+    id: m.id, name: m.name, desc: m.description, group: m.family, logo: m.family.slice(0, 2), color: familyColor(m.family),
+    badges: [...(m.reasoning ? [{ text: "reasoning", tone: "violet" as const }] : []), ...(m.mtp_native ? [{ text: "MTP", tone: "cyan" as const }] : [])],
+    right: [m.params_b >= 100 ? `${Math.round(m.params_b)}B` : `${+m.params_b.toFixed(1)}B${m.active_params_b < m.params_b ? ` · ${+m.active_params_b.toFixed(0)}B act` : ""}`, m.min_gpu],
+    search: `${m.name} ${m.hf_repo} ${m.family} ${m.tags.join(" ")}`.toLowerCase(),
+  }));
+}
+
+const money = (v: number | null) => (v == null ? "?" : v === 0 ? "free" : v < 0.1 ? `$${v.toFixed(3)}` : `$${v.toFixed(2)}`);
+
+export function openrouterEntries(models: OrModel[], featured: string[]): Entry[] {
+  const feat = new Set(featured);
+  return models.map((m) => ({
+    id: m.id, name: m.name, desc: m.description || m.id, group: feat.has(m.id) ? "★ Featured" : m.vendor, logo: m.vendor.slice(0, 2),
+    color: familyColor(m.vendor.charAt(0).toUpperCase() + m.vendor.slice(1)) === "#94a3b8" ? pickColor(m.vendor) : familyColor(m.vendor),
+    badges: [
+      ...(m.open_weights ? [{ text: "open", tone: "green" as const }] : []),
+      ...(m.reasoning ? [{ text: "reasoning", tone: "violet" as const }] : []),
+      ...(m.free ? [{ text: "free", tone: "cyan" as const }] : []),
+    ],
+    right: [
+      ...(m.context_length ? [`${m.context_length >= 1e6 ? `${(m.context_length / 1e6).toFixed(1)}M` : `${Math.round(m.context_length / 1000)}k`} ctx`] : []),
+      `${money(m.prompt_per_m)} / ${money(m.completion_per_m)}`,
+    ],
+    search: `${m.name} ${m.id} ${m.vendor} ${m.open_weights ? "open" : "closed"} ${m.reasoning ? "reasoning" : ""}`.toLowerCase(),
+  }));
+}
+
+function pickColor(seed: string): string {
+  const palette = ["#60a5fa", "#a78bfa", "#fb923c", "#34d399", "#22d3ee", "#818cf8", "#f472b6", "#fbbf24", "#f87171", "#4ade80"];
+  let h = 0;
+  for (const c of seed) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return palette[h % palette.length];
 }

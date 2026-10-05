@@ -10,7 +10,7 @@ const FAMILY_COLORS: Record<string, string> = {
 };
 export const familyColor = (f: string) => FAMILY_COLORS[f] ?? "#94a3b8";
 
-type IconName = "check" | "x" | "chev" | "search" | "bolt" | "code" | "calc" | "chat" | "shield" | "gauge" | "gear" | "download" | "refresh" | "spark" | "clock" | "cpu" | "trash" | "stop" | "copy" | "arrow" | "flask" | "history";
+type IconName = "check" | "x" | "chev" | "search" | "bolt" | "code" | "calc" | "chat" | "shield" | "gauge" | "gear" | "download" | "refresh" | "spark" | "clock" | "cpu" | "trash" | "stop" | "copy" | "arrow" | "flask" | "history" | "layers" | "sun" | "moon" | "key" | "compare" | "alert";
 const PATHS: Record<IconName, ReactNode> = {
   check: <path d="M5 12.5l4.5 4.5L19 7" />,
   x: <path d="M6 6l12 12M18 6L6 18" />,
@@ -34,6 +34,12 @@ const PATHS: Record<IconName, ReactNode> = {
   arrow: <path d="M5 12h14m-5-5l5 5-5 5" />,
   flask: <path d="M9 3h6M10 3v6L4.5 19a1.5 1.5 0 001.3 2.2h12.4a1.5 1.5 0 001.3-2.2L14 9V3M7.5 15h9" />,
   history: <><path d="M4 12a8 8 0 108-8 8 8 0 00-6.4 3.2M4 4v4h4" /><path d="M12 8v4l3 2" /></>,
+  layers: <path d="M12 3l9 5-9 5-9-5 9-5zM3 13l9 5 9-5M3 17.5l9 5 9-5" transform="translate(0 -1.5)" />,
+  sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2.5v2M12 19.5v2M4.6 4.6l1.4 1.4M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4L6 18M18 6l1.4-1.4" /></>,
+  moon: <path d="M20 14.5A8.5 8.5 0 019.5 4 8.5 8.5 0 1020 14.5z" />,
+  key: <><circle cx="8" cy="15" r="4" /><path d="M10.8 12.2L20 3m-4 4l3 3m-6-0l2 2" /></>,
+  compare: <path d="M7 4v16M17 4v16M3 8h8M13 16h8M3 12h8M13 12h8" />,
+  alert: <><path d="M12 3.5l9.5 16.5h-19L12 3.5z" /><path d="M12 10v4.5M12 17.5v.01" /></>,
 };
 export function Icon({ name, size = 18, stroke = 1.9 }: { name: IconName; size?: number; stroke?: number }) {
   return (
@@ -56,7 +62,7 @@ export function ScoreRing({ value, grade, size = 200 }: { value: number; grade?:
             <stop offset="1" stopColor="var(--violet)" />
           </linearGradient>
         </defs>
-        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="12" />
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" style={{ stroke: "var(--track)" }} strokeWidth="12" />
         <circle
           cx={size / 2} cy={size / 2} r={r} fill="none" stroke="url(#ringg)" strokeWidth="12" strokeLinecap="round"
           strokeDasharray={`${(c * Math.max(0, Math.min(100, value))) / 100} ${c}`} transform={`rotate(-90 ${size / 2} ${size / 2})`}
@@ -90,11 +96,11 @@ export function Radar({ axes, size = 300 }: { axes: { label: string; value: numb
         </linearGradient>
       </defs>
       {[25, 50, 75, 100].map((g) => (
-        <polygon key={g} points={axes.map((_, i) => pt(i, g).join(",")).join(" ")} fill="none" stroke="rgba(255,255,255,0.09)" />
+        <polygon key={g} points={axes.map((_, i) => pt(i, g).join(",")).join(" ")} fill="none" style={{ stroke: "var(--grid)" }} />
       ))}
       {axes.map((_, i) => {
         const [x, y] = pt(i, 100);
-        return <line key={i} x1={cx} y1={cy} x2={x} y2={y} stroke="rgba(255,255,255,0.09)" />;
+        return <line key={i} x1={cx} y1={cy} x2={x} y2={y} style={{ stroke: "var(--grid)" }} />;
       })}
       <polygon points={poly} fill="url(#radg)" stroke="#a78bfa" strokeWidth="2" strokeLinejoin="round" />
       {axes.map((a, i) => {
@@ -102,8 +108,8 @@ export function Radar({ axes, size = 300 }: { axes: { label: string; value: numb
         const [lx, ly] = pt(i, 128);
         return (
           <g key={a.label}>
-            <circle cx={x} cy={y} r="4" fill={scoreColor(a.value)} stroke="#07070d" strokeWidth="2" />
-            <text x={lx} y={ly} fill="#c9cde0" fontSize="12" fontWeight="600" textAnchor="middle" dominantBaseline="middle">{a.label}</text>
+            <circle cx={x} cy={y} r="4" fill={scoreColor(a.value)} style={{ stroke: "var(--bg)" }} strokeWidth="2" />
+            <text x={lx} y={ly} style={{ fill: "var(--text)" }} fontSize="12" fontWeight="600" textAnchor="middle" dominantBaseline="middle">{a.label}</text>
             <text x={lx} y={ly + 14} fill={scoreColor(a.value)} fontSize="12" fontWeight="700" textAnchor="middle" dominantBaseline="middle">{Math.round(a.value)}</text>
           </g>
         );
@@ -174,3 +180,37 @@ export function timeAgo(iso: string | null): string {
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
   return `${Math.floor(s / 86400)}d ago`;
 }
+
+export interface RadarSeries { label: string; color: string; values: number[] }
+
+export function MultiRadar({ axes, series, size = 340 }: { axes: string[]; series: RadarSeries[]; size?: number }) {
+  const cx = size / 2, cy = size / 2, R = size / 2 - 50;
+  const n = axes.length;
+  const pt = (i: number, v: number): [number, number] => {
+    const a = (Math.PI * 2 * i) / n - Math.PI / 2;
+    return [cx + Math.cos(a) * R * (v / 100), cy + Math.sin(a) * R * (v / 100)];
+  };
+  return (
+    <svg viewBox={`0 0 ${size} ${size}`} width="100%" style={{ maxWidth: size }} role="img" aria-label="Radar chart comparing models">
+      {[25, 50, 75, 100].map((g) => <polygon key={g} points={axes.map((_, i) => pt(i, g).join(",")).join(" ")} fill="none" stroke="var(--border)" />)}
+      {axes.map((a, i) => {
+        const [x, y] = pt(i, 100);
+        const [lx, ly] = pt(i, 122);
+        return (
+          <g key={a}>
+            <line x1={cx} y1={cy} x2={x} y2={y} stroke="var(--border)" />
+            <text x={lx} y={ly} fill="var(--muted)" fontSize="12" fontWeight="600" textAnchor="middle" dominantBaseline="middle">{a}</text>
+          </g>
+        );
+      })}
+      {series.map((s) => (
+        <g key={s.label}>
+          <polygon points={s.values.map((v, i) => pt(i, v).join(",")).join(" ")} fill={s.color} fillOpacity="0.14" stroke={s.color} strokeWidth="2" strokeLinejoin="round" />
+          {s.values.map((v, i) => { const [x, y] = pt(i, v); return <circle key={i} cx={x} cy={y} r="3.2" fill={s.color} />; })}
+        </g>
+      ))}
+    </svg>
+  );
+}
+
+export const SERIES_COLORS = ["#8b5cf6", "#22d3ee", "#fbbf24", "#f472b6", "#34d399"];

@@ -41,7 +41,7 @@ class RunRequest(BaseModel):
     model_id: str = ""
     custom_model: CustomModel | None = None
     provider: Literal["modal", "openrouter", "openai", "mock"] | None = None
-    openrouter_model: str | None = Field(default=None, max_length=200, pattern=r"^[\w.\-]+/[\w.\-:~]+$")
+    openrouter_model: str | None = Field(default=None, max_length=200, pattern=r"^~?[\w.\-]+/[\w.\-:~]+$")
     openrouter_key: str | None = Field(default=None, max_length=300)
     stress: Literal["garble", "loop"] | None = None
     gpu: str | None = None

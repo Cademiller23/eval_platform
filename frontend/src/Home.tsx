@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "./api";
-import { ModelPicker } from "./ModelPicker";
-import type { AppConfig, ModelInfo, RunOptions, RunSummary } from "./types";
+import { Picker, catalogEntries, openrouterEntries, type Selection } from "./ModelPicker";
+import type { AppConfig, ModelInfo, OrModels, OrStatus, RunOptions, RunSummary } from "./types";
 import { Badge, Icon, fmt, scoreColor, timeAgo, verdictTone } from "./ui";
 
 const FEATURES = [
@@ -13,6 +13,10 @@ const FEATURES = [
   { icon: "bolt", color: "#22d3ee", title: "Speed & speculation", text: "Decode tok/s, TTFT, concurrency scaling, hardware-roofline efficiency, and whether speculative decoding is really running." },
   { icon: "spark", color: "#f472b6", title: "Exact fix-it plan", text: "Model-specific steps to add speculative decoding, make it faster and more coherent — each backed by the evidence from your run." },
 ] as const;
+
+const KEY_STORE = "coherence-lab.openrouter-key";
+const readKey = () => { try { return sessionStorage.getItem(KEY_STORE) ?? ""; } catch { return ""; } };
+export const savedOpenRouterKey = readKey;
 
 export function Home() {
   const nav = useNavigate();
@@ -28,7 +32,13 @@ export function Home() {
   const [spec, setSpec] = useState("auto");
   const [specJson, setSpecJson] = useState('{"method": "ngram", "num_speculative_tokens": 5, "prompt_lookup_max": 4}');
   const [quick, setQuick] = useState(false);
+  const [multi, setMulti] = useState(false);
+  const [stress, setStress] = useState<"" | "garble" | "loop">("");
   const [ep, setEp] = useState({ base_url: "http://localhost:8000/v1", api_key: "", model: "" });
+  const [orKey, setOrKey] = useState(readKey());
+  const [orModels, setOrModels] = useState<OrModels | null>(null);
+  const [orLoading, setOrLoading] = useState(false);
+  const [orStatus, setOrStatus] = useState<OrStatus | null>(null);
 
   useEffect(() => {
     api.config().then((c) => { setCfg(c); setProvider(c.default_provider); }).catch((e) => setErr(`Cannot reach the API: ${e.message}`));
@@ -39,59 +49,128 @@ export function Home() {
     return () => clearInterval(t);
   }, []);
 
-  const prov = cfg?.providers.find((p) => p.id === provider);
+  useEffect(() => {
+    if (provider !== "openrouter" || orModels || orLoading) return;
+    setOrLoading(true);
+    api.openrouterModels().then(setOrModels).catch((e) => setErr(`Could not load OpenRouter models: ${e.message}`)).finally(() => setOrLoading(false));
+  }, [provider, orModels, orLoading]);
 
-  const start = async (sel: { model_id?: string; custom_hf?: string }) => {
-    setErr(null);
-    setBusy(true);
-    const opts: RunOptions = { provider, quick, speculative: spec };
-    if (sel.model_id) opts.model_id = sel.model_id; else opts.custom_model = { hf_repo: sel.custom_hf! };
-    if (gpu) opts.gpu = gpu;
-    if (spec === "custom") opts.speculative_custom = specJson;
+  useEffect(() => { try { orKey ? sessionStorage.setItem(KEY_STORE, orKey) : sessionStorage.removeItem(KEY_STORE); } catch { /* private mode */ } }, [orKey]);
+
+  const prov = cfg?.providers.find((p) => p.id === provider);
+  const isOR = provider === "openrouter";
+  const entries = useMemo(
+    () => (isOR ? openrouterEntries(orModels?.models ?? [], orModels?.featured ?? []) : catalogEntries(models)),
+    [isOR, orModels, models],
+  );
+  const keyOk = !isOR || !!orKey.trim() || !!cfg?.openrouter_key_set;
+
+  const buildOptions = (id: string | null, custom?: string): RunOptions => {
+    const opts: RunOptions = { provider, quick, speculative: isOR ? "auto" : spec };
+    if (isOR) {
+      opts.openrouter_model = id ?? custom!;
+      if (orKey.trim()) opts.openrouter_key = orKey.trim();
+    } else if (id) opts.model_id = id;
+    else opts.custom_model = { hf_repo: custom! };
+    if (!isOR && gpu) opts.gpu = gpu;
+    if (!isOR && spec === "custom") opts.speculative_custom = specJson;
     if (provider === "openai") opts.endpoint = { base_url: ep.base_url, api_key: ep.api_key || undefined, model: ep.model || undefined };
+    if (stress) opts.stress = stress;
+    return opts;
+  };
+
+  const start = async (sel: Selection) => {
+    setErr(null);
+    if (!keyOk) { setOpen(true); setErr("Enter an OpenRouter API key in Run options (or set OPENROUTER_API_KEY on the server)."); return; }
+    setBusy(true);
     try {
-      const { run_id } = await api.start(opts);
-      nav(`/runs/${run_id}`);
+      const targets: { id: string | null; custom?: string }[] = sel.ids.length ? sel.ids.map((id) => ({ id })) : [{ id: null, custom: sel.custom }];
+      const started: string[] = [];
+      for (const t of targets) {
+        const { run_id } = await api.start(buildOptions(t.id, t.custom));
+        started.push(run_id);
+      }
+      nav(started.length === 1 ? `/runs/${started[0]}` : `/compare?ids=${started.join(",")}`);
     } catch (e) {
       setErr((e as Error).message);
       setBusy(false);
     }
   };
 
+  const checkKey = async () => {
+    setOrStatus(null);
+    try { setOrStatus(await api.openrouterStatus()); } catch (e) { setOrStatus({ configured: true, valid: null, error: (e as Error).message }); }
+  };
+
   const summary = [
-    cfg?.providers.find((p) => p.id === provider)?.label ?? "…",
-    gpu || "recommended GPU",
-    cfg?.speculative_modes.find((m) => m.id === spec)?.label ?? spec,
+    prov?.label ?? "…",
+    ...(isOR ? [] : [gpu || "recommended GPU", cfg?.speculative_modes.find((m) => m.id === spec)?.label ?? spec]),
     quick ? "quick suite" : "full suite",
+    ...(multi ? ["compare mode"] : []),
+    ...(stress ? [`stress: ${stress}`] : []),
   ].join(" · ");
+
+  const eta = isOR ? "1–4 min" : provider === "mock" ? "under a minute" : quick ? "3–8 min" : "5–15 min";
 
   return (
     <>
       <section className="hero">
-        <div className="eyebrow"><span className="dot green pulse" /> Evaluates on Modal GPUs · vLLM · OpenAI-compatible endpoints</div>
+        <div className="eyebrow"><span className="dot green pulse" /> Modal GPUs · OpenRouter · any OpenAI-compatible endpoint</div>
         <h1>Is your model <span className="gradient-text">actually ready</span> to ship?</h1>
         <p className="lead">Pick a model. We boot it, stress-test its coherency across coding, math and general tasks, measure decode speed, detect speculative decoding — then hand you a scorecard and the exact steps to make it faster and better.</p>
 
-        <ModelPicker models={models} onSelect={start} busy={busy} disabled={!cfg} />
-        <div className="hint-line">Selecting a model starts the evaluation immediately · ~{quick ? "2" : "5"}–15 min on Modal (cold start included)</div>
+        <Picker
+          entries={entries}
+          onSelect={start}
+          busy={busy}
+          loading={isOR && orLoading}
+          disabled={!cfg}
+          multi={multi}
+          searchPlaceholder={isOR ? "Search OpenRouter — or paste any model slug (vendor/model)" : "Search models — or paste any Hugging Face repo (org/name)"}
+          customPattern={isOR ? /^~?[\w.-]+\/[\w.:~-]+$/ : /^[\w.-]+\/[\w.-]+$/}
+          customLabel={isOR ? "Evaluate OpenRouter model" : "Evaluate custom model"}
+          placeholder={isOR ? "Select an OpenRouter model to evaluate" : "Select a model to evaluate"}
+          footer={isOR ? "Picking a model starts the evaluation through OpenRouter" : undefined}
+        />
+        <div className="hint-line">{multi ? "Compare mode: tick up to 4 models, then start them together" : "Selecting a model starts the evaluation immediately"} · ~{eta}{isOR ? " · typically a few cents" : ""}</div>
 
         <div className="opts">
-          <button className="opts-toggle" onClick={() => setOpen((o) => !o)}>
+          <button className="opts-toggle" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
             <Icon name="gear" size={16} /> Run options <span className="faint">— {summary}</span> <Icon name="chev" size={14} />
           </button>
           {open && cfg && (
             <div className="card opts-panel">
               <div className="field">
                 <label>Where to run the model</label>
-                <div className="seg">
+                <div className="seg" role="radiogroup">
                   {cfg.providers.map((p) => (
-                    <button key={p.id} className={provider === p.id ? "on" : ""} onClick={() => setProvider(p.id)} disabled={!p.available && p.id !== "mock" && p.id !== "openai"}>
-                      <span className={`dot ${p.available ? "green" : "red"}`} /> {p.label}
+                    <button key={p.id} className={provider === p.id ? "on" : ""} onClick={() => setProvider(p.id)} role="radio" aria-checked={provider === p.id}>
+                      <span className={`dot ${p.available || p.id === "openai" || p.id === "openrouter" ? "green" : "red"}`} /> {p.id === "mock" ? "Demo" : p.label}
                     </button>
                   ))}
                 </div>
                 {prov && <div className="hint">{prov.hint}</div>}
               </div>
+
+              {isOR && (
+                <div className="field">
+                  <label>OpenRouter API key</label>
+                  {cfg.openrouter_key_set ? (
+                    <div className="key-row">
+                      <span className="badge green"><Icon name="check" size={12} stroke={3} /> OPENROUTER_API_KEY found on the server</span>
+                      <button className="btn small" onClick={checkKey}>Check key &amp; credit</button>
+                      {orStatus && (orStatus.valid
+                        ? <span className="muted" style={{ fontSize: 13 }}>Valid{orStatus.remaining != null ? ` · $${orStatus.remaining.toFixed(2)} credit left` : orStatus.limit == null ? " · no spend limit" : ""}</span>
+                        : <span style={{ color: "var(--red)", fontSize: 13 }}>{orStatus.error ?? "Key rejected"}</span>)}
+                    </div>
+                  ) : (
+                    <>
+                      <input className="input" type="password" autoComplete="off" spellCheck={false} placeholder="sk-or-v1-…" value={orKey} onChange={(e) => setOrKey(e.target.value)} />
+                      <div className="hint">Kept only in this browser tab (session storage) and sent with your run — never stored on the server. Or export <span className="mono">OPENROUTER_API_KEY</span> before starting the server.</div>
+                    </>
+                  )}
+                </div>
+              )}
 
               {provider === "openai" && (
                 <div className="grid3">
@@ -101,51 +180,82 @@ export function Home() {
                 </div>
               )}
 
-              <div className="grid2">
-                {provider !== "openai" && (
+              {!isOR && (
+                <div className="grid2">
+                  {provider !== "openai" && (
+                    <div className="field">
+                      <label>GPU</label>
+                      <select className="select" value={gpu} onChange={(e) => setGpu(e.target.value)}>
+                        <option value="">Recommended for the model</option>
+                        {cfg.gpus.map((g) => <option key={g.id} value={g.id}>{g.id} · {g.mem_gb} GB · {g.bw_gbs} GB/s</option>)}
+                        <option value="H100:2">H100 × 2</option><option value="H100:4">H100 × 4</option><option value="H200:2">H200 × 2</option><option value="H200:8">H200 × 8</option>
+                      </select>
+                      <div className="hint">Decode speed is memory-bandwidth bound — more GB/s means more tokens/s.</div>
+                    </div>
+                  )}
                   <div className="field">
-                    <label>GPU</label>
-                    <select className="select" value={gpu} onChange={(e) => setGpu(e.target.value)}>
-                      <option value="">Recommended for the model</option>
-                      {cfg.gpus.map((g) => <option key={g.id} value={g.id}>{g.id} · {g.mem_gb} GB · {g.bw_gbs} GB/s</option>)}
-                      <option value="H100:2">H100 × 2</option><option value="H100:4">H100 × 4</option><option value="H200:2">H200 × 2</option><option value="H200:8">H200 × 8</option>
+                    <label>Speculative decoding</label>
+                    <select className="select" value={spec} onChange={(e) => setSpec(e.target.value)}>
+                      {cfg.speculative_modes.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
                     </select>
-                    <div className="hint">Decode speed is memory-bandwidth bound — more GB/s means more tokens/s.</div>
+                    <div className="hint">{cfg.speculative_modes.find((m) => m.id === spec)?.hint}</div>
                   </div>
-                )}
-                <div className="field">
-                  <label>Speculative decoding</label>
-                  <select className="select" value={spec} onChange={(e) => setSpec(e.target.value)}>
-                    {cfg.speculative_modes.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-                  </select>
-                  <div className="hint">{cfg.speculative_modes.find((m) => m.id === spec)?.hint}</div>
                 </div>
-              </div>
-              {spec === "custom" && (
+              )}
+              {!isOR && spec === "custom" && (
                 <div className="field"><label>--speculative-config (JSON)</label><textarea className="input mono" rows={3} value={specJson} onChange={(e) => setSpecJson(e.target.value)} /></div>
               )}
-              <div className="toggle">
-                <button className={`switch ${quick ? "on" : ""}`} onClick={() => setQuick(!quick)} aria-pressed={quick} aria-label="Quick mode" />
-                <div><div style={{ fontWeight: 600, fontSize: 14 }}>Quick mode</div><div className="faint" style={{ fontSize: 12.5 }}>{cfg.suite.quick} representative tests instead of {cfg.suite.full}. Same pipeline, faster result.</div></div>
+
+              <div className="grid2">
+                <div className="toggle">
+                  <button className={`switch ${quick ? "on" : ""}`} onClick={() => setQuick(!quick)} aria-pressed={quick} aria-label="Quick mode" />
+                  <div><div style={{ fontWeight: 600, fontSize: 14 }}>Quick mode</div><div className="faint" style={{ fontSize: 12.5 }}>{cfg.suite.quick} representative tests instead of {cfg.suite.full}. Same pipeline, faster result.</div></div>
+                </div>
+                <div className="toggle">
+                  <button className={`switch ${multi ? "on" : ""}`} onClick={() => setMulti(!multi)} aria-pressed={multi} aria-label="Compare mode" />
+                  <div><div style={{ fontWeight: 600, fontSize: 14 }}>Compare several models</div><div className="faint" style={{ fontSize: 12.5 }}>Multi-select up to 4 models and get a side-by-side leaderboard.</div></div>
+                </div>
               </div>
+
+              <div className="field">
+                <label>Detector self-check (advanced)</label>
+                <select className="select" value={stress} onChange={(e) => setStress(e.target.value as "" | "garble" | "loop")}>
+                  <option value="">Off — evaluate the model as it is</option>
+                  <option value="garble">Break sampling: temperature 2.0 (should produce garbled text)</option>
+                  <option value="loop">Break sampling: negative repetition penalties (should produce loops)</option>
+                </select>
+                <div className="hint">Deliberately corrupts decoding on the <b>same</b> model so you can confirm the platform really flags garbling and repetition. Scores are expected to drop.</div>
+              </div>
+
               {provider === "modal" && !cfg.hf_token_set && (
                 <div className="banner warn"><Icon name="shield" size={18} /><div>No <b>HF_TOKEN</b> set — gated models (Llama, Gemma) will fail to download. Export it before starting the server.</div></div>
               )}
             </div>
           )}
-          {cfg && prov && !prov.available && (
+
+          {cfg && prov && !prov.available && provider !== "openrouter" && provider !== "openai" && (
             <div className="banner warn" style={{ marginTop: 14 }}>
               <Icon name="bolt" size={18} />
               <div><b>{prov.label} isn't ready:</b> {prov.hint} Switch to <a style={{ textDecoration: "underline", cursor: "pointer" }} onClick={() => { setProvider("mock"); setOpen(true); }}>Demo mode</a> to explore the platform without a GPU.</div>
             </div>
           )}
+          {isOR && (
+            <div className={`banner ${keyOk ? "" : "warn"}`} style={{ marginTop: 14 }}>
+              <Icon name={keyOk ? "bolt" : "key"} size={18} />
+              <div>
+                {keyOk ? <><b>Hosted API.</b> Tokens/s and latency include network and provider queueing, and the serving engine is invisible — so speculative decoding can't be observed. Coherency, coding, math and general scores are fully valid.</>
+                  : <><b>OpenRouter key needed.</b> Open <a style={{ textDecoration: "underline", cursor: "pointer" }} onClick={() => setOpen(true)}>Run options</a> and paste a key, or export <span className="mono">OPENROUTER_API_KEY</span> and restart.</>}
+                {orModels && !orModels.live && <div style={{ marginTop: 6 }}><Icon name="alert" size={14} /> Couldn't reach OpenRouter's model list — showing a built-in selection. Any valid slug can still be pasted.</div>}
+              </div>
+            </div>
+          )}
           {cfg && provider === "mock" && (
             <div className="banner ok" style={{ marginTop: 14 }}>
               <Icon name="flask" size={18} />
-              <div><b>Demo mode</b> — models are simulated (no GPU, no credentials). Quality, speed and failure modes are synthetic; use Modal for real measurements.</div>
+              <div><b>Demo mode</b> — models are simulated (no GPU, no credentials). Quality, speed and failure modes are synthetic; use Modal or OpenRouter for real measurements.</div>
             </div>
           )}
-          {err && <div className="banner err" style={{ marginTop: 14 }}><Icon name="x" size={18} /><div>{err}</div></div>}
+          {err && <div className="banner err" style={{ marginTop: 14 }} role="alert"><Icon name="x" size={18} /><div>{err}</div></div>}
         </div>
       </section>
 
@@ -164,7 +274,7 @@ export function Home() {
 
       {runs.length > 0 && (
         <section className="section">
-          <h2>Recent evaluations</h2>
+          <h2>Recent evaluations <Link to="/history" className="faint" style={{ fontSize: 12, letterSpacing: 0, textTransform: "none" }}>View all →</Link></h2>
           <div className="runs-list">
             {runs.slice(0, 8).map((r) => <RunRow key={r.id} r={r} />)}
           </div>
@@ -174,19 +284,35 @@ export function Home() {
   );
 }
 
-export function RunRow({ r }: { r: RunSummary }) {
+export function providerLabel(p?: string): string {
+  return p === "mock" ? "Demo" : p === "openai" ? "Endpoint" : p === "openrouter" ? "OpenRouter" : "Modal";
+}
+
+export function RunRow({ r, selected, onToggle }: { r: RunSummary; selected?: boolean; onToggle?: (id: string) => void }) {
   const live = r.status === "running" || r.status === "queued";
   return (
-    <Link to={`/runs/${r.id}`} className="run-row">
-      <div><div className="nm">{r.model.name}</div><div className="sm">{r.options.provider === "mock" ? "Demo" : r.options.provider === "openai" ? "Endpoint" : "Modal"} · {r.options.speculative && r.options.speculative !== "auto" ? `spec: ${r.options.speculative}` : "baseline"} · {timeAgo(r.created_at)}</div></div>
-      <div>
-        {live ? <Badge tone="violet"><span className="spinner" style={{ width: 10, height: 10 }} /> running</Badge>
-          : r.status === "completed" ? <Badge tone={verdictTone(r.verdict)}>{r.verdict === "ready" ? "Ready" : r.verdict === "caution" ? "Caution" : "Not ready"}</Badge>
-          : <Badge tone="red">{r.status}</Badge>}
-      </div>
-      <div className="mono" style={{ color: r.scores ? scoreColor(r.scores.overall) : "var(--faint)", fontWeight: 700 }}>{r.scores ? `${Math.round(r.scores.overall)} / 100` : "—"}</div>
-      <div className="mono muted">{r.decode_tps ? `${fmt(r.decode_tps, 0)} tok/s` : "—"}</div>
-      <Icon name="arrow" size={16} />
-    </Link>
+    <div className={`run-wrap ${onToggle ? "selectable" : ""}`}>
+      {onToggle && (
+        <button className={`cbox ${selected ? "on" : ""}`} onClick={() => onToggle(r.id)} aria-label={`Select ${r.model.name} for comparison`} aria-pressed={selected} disabled={r.status !== "completed"}>
+          {selected && <Icon name="check" size={13} stroke={3} />}
+        </button>
+      )}
+      <Link to={`/runs/${r.id}`} className="run-row">
+        <div>
+          <div className="nm">{r.model.name}</div>
+          <div className="sm">
+            {providerLabel(r.options.provider)} · {r.options.stress ? `stress: ${r.options.stress}` : r.options.speculative && r.options.speculative !== "auto" ? `spec: ${r.options.speculative}` : "baseline"} · {timeAgo(r.created_at)}
+          </div>
+        </div>
+        <div>
+          {live ? <Badge tone="violet"><span className="spinner" style={{ width: 10, height: 10 }} /> running</Badge>
+            : r.status === "completed" ? <Badge tone={verdictTone(r.verdict)}>{r.verdict === "ready" ? "Ready" : r.verdict === "caution" ? "Caution" : "Not ready"}</Badge>
+            : <Badge tone="red">{r.status}</Badge>}
+        </div>
+        <div className="mono" style={{ color: r.scores ? scoreColor(r.scores.overall) : "var(--faint)", fontWeight: 700 }}>{r.scores ? `${Math.round(r.scores.overall)} / 100` : "—"}</div>
+        <div className="mono muted">{r.decode_tps ? `${fmt(r.decode_tps, 0)} tok/s` : "—"}</div>
+        <Icon name="arrow" size={16} />
+      </Link>
+    </div>
   );
 }

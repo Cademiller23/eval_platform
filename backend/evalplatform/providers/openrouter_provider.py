@@ -213,7 +213,7 @@ class OpenRouterProvider(Provider):
         if meta.get("free"):
             progress("warn", "Free models are heavily rate-limited — running with low concurrency; expect retries and slower tests.")
         if meta.get("prompt_per_m") is not None:
-            progress("info", f"Pricing: ${meta['prompt_per_m']}/M input · ${meta['completion_per_m']}/M output tokens (a full run uses ≈ 60k tokens).")
+            progress("info", f"Pricing: ${meta['prompt_per_m']}/M input · ${meta['completion_per_m']}/M output tokens (a full run uses roughly 15–40k tokens).")
 
         extra_body: dict[str, Any] = {}
         if spec.model.get("chat_template_kwargs"):

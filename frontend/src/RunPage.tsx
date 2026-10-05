@@ -86,7 +86,9 @@ export function RunPage() {
           <div className="sub">
             <span className="mono">{run.model.hf_repo}</span>
             {run.options.provider === "mock" && <Badge tone="violet">demo</Badge>}
-            {run.options.speculative && run.options.speculative !== "auto" && <Badge tone="cyan">spec: {run.options.speculative}</Badge>}
+            {run.options.provider === "openrouter" && <Badge tone="cyan">OpenRouter</Badge>}
+            {run.options.stress && <Badge tone="amber">stress: {run.options.stress}</Badge>}
+            {run.options.speculative && run.options.speculative !== "auto" && run.options.provider !== "openrouter" && <Badge tone="cyan">spec: {run.options.speculative}</Badge>}
             {run.options.quick && <Badge>quick</Badge>}
             {active && <Badge tone="violet"><span className="spinner" style={{ width: 10, height: 10 }} /> evaluating</Badge>}
           </div>
@@ -166,7 +168,7 @@ function LiveView({ run, live }: { run: RunFull; live: Live }) {
           <div className="kv" style={{ marginTop: 18 }}>
             <div><span className="k">Phase</span><span className="v">{current?.title ?? "—"}{prog ? ` · ${prog.done}/${prog.total}` : ""}</span></div>
             <div><span className="k">Tests done</span><span className="v">{live.tests.length}</span></div>
-            {env && <div><span className="k">GPU</span><span className="v">{env.requested_gpu ?? env.gpu ?? "—"}</span></div>}
+            {env && <div><span className="k">{env.hosted ? "Via" : "GPU"}</span><span className="v">{env.hosted ? "OpenRouter" : env.requested_gpu ?? env.gpu ?? "—"}</span></div>}
             {env?.engine && <div><span className="k">Engine</span><span className="v">{env.engine} {env.engine_version}</span></div>}
             {live.perf && <div><span className="k">TTFT p50</span><span className="v">{fmt(live.perf.ttft_ms_p50, 0, " ms")}</span></div>}
           </div>

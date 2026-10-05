@@ -1,4 +1,4 @@
-import type { AppConfig, ModelInfo, RunFull, RunOptions, RunSummary } from "./types";
+import type { AppConfig, ModelInfo, OrModels, OrStatus, RunFull, RunOptions, RunSummary } from "./types";
 
 async function j<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -15,6 +15,8 @@ async function j<T>(res: Response): Promise<T> {
 export const api = {
   config: () => fetch("/api/config").then((r) => j<AppConfig>(r)),
   models: () => fetch("/api/models").then((r) => j<ModelInfo[]>(r)),
+  openrouterModels: (refresh = false) => fetch(`/api/openrouter/models${refresh ? "?refresh=true" : ""}`).then((r) => j<OrModels>(r)),
+  openrouterStatus: () => fetch("/api/openrouter/status").then((r) => j<OrStatus>(r)),
   runs: () => fetch("/api/runs").then((r) => j<RunSummary[]>(r)),
   run: (id: string) => fetch(`/api/runs/${id}`).then((r) => j<RunFull>(r)),
   start: (opts: RunOptions) =>

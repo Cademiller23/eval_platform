@@ -114,7 +114,7 @@ async def test_full_run_report_for_hosted_closed_model(replay):
     assert rep["performance"]["decode_tps_median"] > 20
 
 
-@pytest.mark.parametrize("name", sorted(PROFILES))
+@pytest.mark.parametrize("name", sorted(RECS))
 async def test_all_four_replayed_models_score_like_the_real_models_did(replay, name):
     replay()
     rep, _ = await run(f"replay/{name}")
@@ -204,3 +204,42 @@ async def test_unknown_model_fails_the_run_with_a_helpful_message(replay):
     replay()
     with pytest.raises(ValueError, match="no model"):
         await run("replay/nope")
+
+
+# ------------------------------------------------------------------------------------------ the checker itself
+async def test_checker_passes_on_a_realistic_spread_and_writes_review_files(replay, tmp_path):
+    from evalplatform.checker import verify
+
+    replay()
+    res = await verify(["replay/sonnet", "replay/haiku", "replay/tiny"], key=KEY, quick=True, out_dir=tmp_path, progress=lambda m: None)
+    by = {c.name: c for c in res.checks}
+    assert res.ok, [(c.name, c.status, c.detail) for c in res.checks if c.status == "FAIL"]
+    assert by["suite separates strong from weak models"].status == "PASS"
+    assert any(c.status == "PASS" and "garble" in c.name for c in res.checks)
+    assert any(c.status == "PASS" and "'loop'" in c.name for c in res.checks)
+    assert (tmp_path / "summary.md").read_text().count("✅") >= 6
+    tiny_review = (tmp_path / "review" / "replay__tiny.md").read_text()
+    assert "FAIL" in tiny_review and "```" in tiny_review      # failures come with prompt + response evidence
+    assert (tmp_path / "reports" / "replay__sonnet--stress-garble.json").exists()
+
+
+async def test_checker_fails_loudly_when_detectors_would_miss_corruption(replay, tmp_path, monkeypatch):
+    """Sanity-check the checker: if the garble detector were broken, the verification must FAIL, not pass silently."""
+    from evalplatform import checker
+    from evalplatform.suite import coherence
+
+    import evalplatform.scoring as scoring
+
+    replay()
+    monkeypatch.setattr(coherence, "GARBLE_KINDS", set())      # detectors can no longer call anything "garbled"
+    monkeypatch.setattr(scoring, "coherency_summary", lambda tests: _blind(tests))   # …and the summary sees nothing wrong
+    res = await checker.verify(["replay/sonnet", "replay/haiku", "replay/tiny"], key=KEY, quick=True, out_dir=tmp_path, progress=lambda m: None)
+    assert not res.ok
+    assert any(c.status == "FAIL" and "corruption" in c.name for c in res.checks)
+
+
+def _blind(tests):
+    """A coherency summary that sees nothing wrong with any response."""
+    n = len(tests) or 1
+    return {"responses": n, "clean_ratio": 1.0, "clean_score": 100.0, "garble_rate": 0.0, "repetition_rate": 0.0, "special_token_leak_rate": 0.0,
+            "empty_rate": 0.0, "truncation_rate": 0.0, "language_drift_rate": 0.0, "runaway_rate": 0.0, "severe_rate": 0.0, "mean_logprob": None, "issue_kinds": {}}

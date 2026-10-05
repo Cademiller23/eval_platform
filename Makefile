@@ -1,4 +1,4 @@
-.PHONY: setup build start demo dev test deploy-modal clean
+.PHONY: setup build start demo dev test e2e verify replay deploy-modal clean
 
 PY ?= python3
 
@@ -20,6 +20,15 @@ dev:              ## API with auto-reload + Vite dev server on :5173
 
 test:             ## run the backend test-suite
 	$(PY) -m pytest -q
+
+e2e: build        ## browser journey test against the local replay server (needs `npm i -D playwright` once)
+	node scripts/e2e.mjs
+
+verify:           ## verify the suite against real OpenRouter models (needs OPENROUTER_API_KEY; costs cents)
+	$(PY) scripts/verify_openrouter.py $(ARGS)
+
+replay:           ## OpenRouter-compatible server replaying recorded real answers (offline testing)
+	PYTHONPATH=backend $(PY) -m evalplatform.devtools.replay_server --port 9999
 
 deploy-modal:     ## (optional) pre-deploy the GPU serving app; the platform also does this on first use
 	$(PY) -m modal deploy modal_app/serve.py

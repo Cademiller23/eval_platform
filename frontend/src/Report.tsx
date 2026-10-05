@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "./api";
+import { providerLabel, savedOpenRouterKey } from "./Home";
 import { Recommendations } from "./Recs";
 import { TestsTable } from "./TestsTable";
 import type { Report as R, RunFull } from "./types";
@@ -23,10 +24,13 @@ export function Report({ run }: { run: RunFull }) {
     setBusy(true); setErr(null);
     try {
       const o = run.options;
+      const target = o.openrouter_model
+        ? { openrouter_model: o.openrouter_model, openrouter_key: savedOpenRouterKey() || undefined }
+        : o.model_id ? { model_id: o.model_id } : { custom_model: o.custom_model };
       const { run_id } = await api.start({
-        ...(o.model_id ? { model_id: o.model_id } : { custom_model: o.custom_model }),
-        provider: o.provider, gpu: o.gpu, quick: o.quick, max_model_len: o.max_model_len,
-        speculative: spec ?? o.speculative ?? "auto", speculative_custom: o.speculative_custom,
+        ...target,
+        provider: o.provider, gpu: o.gpu ?? undefined, quick: o.quick, max_model_len: o.max_model_len, stress: o.stress ?? undefined,
+        speculative: o.openrouter_model ? "auto" : spec ?? o.speculative ?? "auto", speculative_custom: o.speculative_custom,
         parent_run_id: run.id,
       });
       nav(`/runs/${run_id}`);
@@ -62,6 +66,14 @@ export function Report({ run }: { run: RunFull }) {
         </div>
       </div>
 
+      {r.options.stress && <StressCheck r={r} />}
+      {r.environment.hosted && (
+        <div className="banner" style={{ marginTop: 16 }}>
+          <Icon name="bolt" size={18} />
+          <div><b>Hosted API run.</b> Tokens/s and latency include network and provider queueing{r.environment.providers_seen ? ` (served by ${Object.keys(r.environment.providers_seen).join(", ")})` : ""}; the engine is invisible, so speculative decoding can't be observed. Quality scores are unaffected.</div>
+        </div>
+      )}
+
       <div className="section">
         <h2>Scores</h2>
         <div className="row" style={{ alignItems: "stretch" }}>
@@ -91,7 +103,7 @@ export function Report({ run }: { run: RunFull }) {
       </div>
 
       <div className="section">
-        <h2>Speed & hardware</h2>
+        <h2>{r.environment.hosted ? "Speed & cost" : "Speed & hardware"}</h2>
         <div className="grid3">
           <div className="card">
             <h3>Decode throughput</h3>
@@ -110,24 +122,38 @@ export function Report({ run }: { run: RunFull }) {
               <div><span className="k">TTFT, ~1.5k-token prompt</span><span className="v">{fmt(r.performance.ttft_long_ms, 0, " ms")}</span></div>
               <div><span className="k">×{r.performance.concurrent?.n ?? 8} concurrent</span><span className="v">{fmt(r.performance.concurrent?.aggregate_tps, 0, " tok/s")}</span></div>
               <div><span className="k">Batching gain</span><span className="v">{r.performance.concurrent?.aggregate_tps && r.performance.decode_tps_median ? `${(r.performance.concurrent.aggregate_tps / r.performance.decode_tps_median).toFixed(1)}×` : "—"}</span></div>
-              <div><span className="k">Cold start</span><span className="v">{fmt(r.environment.cold_start_s, 0, " s")}</span></div>
+              <div><span className="k">Cold start</span><span className="v">{r.environment.hosted ? "n/a (hosted)" : fmt(r.environment.cold_start_s, 0, " s")}</span></div>
             </div>
           </div>
-          <div className="card">
-            <h3>Hardware efficiency</h3>
-            <p className="sub">Measured vs the memory-bandwidth ceiling</p>
-            {r.performance.roofline ? (
-              <>
-                <div className="big-stat">{pct(r.performance.roofline.efficiency)}<small>of roofline</small></div>
-                <div style={{ margin: "14px 0 10px" }}><Bar value={r.performance.roofline.efficiency * 100} color="var(--cyan)" /></div>
-                <div className="faint" style={{ fontSize: 12.5, lineHeight: 1.5 }}>Ceiling ≈ {fmt(r.performance.roofline.theoretical_tps, 0)} tok/s on {r.performance.roofline.gpu_count}× {r.performance.roofline.gpu}. Plain decoding cannot exceed it — only speculation, quantisation or a faster GPU can.</div>
-              </>
-            ) : <div className="faint">Roofline unavailable for this endpoint.</div>}
-            <div className="kv" style={{ marginTop: 14 }}>
-              <div><span className="k">GPU</span><span className="v">{r.environment.requested_gpu ?? r.environment.gpu ?? "—"}</span></div>
-              <div><span className="k">Engine</span><span className="v">{r.environment.engine} {r.environment.engine_version}</span></div>
+          {r.environment.hosted ? (
+            <div className="card">
+              <h3>Cost & provider</h3>
+              <p className="sub">What this evaluation cost through OpenRouter</p>
+              <div className="big-stat">{r.usage?.cost_usd != null ? `$${r.usage.cost_usd < 0.1 ? r.usage.cost_usd.toFixed(4) : r.usage.cost_usd.toFixed(2)}` : "—"}<small>this run</small></div>
+              <div className="kv" style={{ marginTop: 16 }}>
+                <div><span className="k">Tokens (in / out)</span><span className="v">{(r.usage?.prompt_tokens ?? 0).toLocaleString()} / {(r.usage?.completion_tokens ?? 0).toLocaleString()}</span></div>
+                <div><span className="k">Price per M (in / out)</span><span className="v">{r.environment.pricing?.prompt_per_m != null ? `$${r.environment.pricing.prompt_per_m} / $${r.environment.pricing.completion_per_m}` : "—"}</span></div>
+                <div><span className="k">Served by</span><span className="v">{r.environment.providers_seen ? Object.entries(r.environment.providers_seen).map(([k, v]) => `${k} ×${v}`).join(", ") : "—"}</span></div>
+                <div><span className="k">Weights</span><span className="v">{r.environment.open_weights ? "Open" : "Closed"}</span></div>
+              </div>
             </div>
-          </div>
+          ) : (
+<div className="card">
+              <h3>Hardware efficiency</h3>
+              <p className="sub">Measured vs the memory-bandwidth ceiling</p>
+              {r.performance.roofline ? (
+                <>
+                  <div className="big-stat">{pct(r.performance.roofline.efficiency)}<small>of roofline</small></div>
+                  <div style={{ margin: "14px 0 10px" }}><Bar value={r.performance.roofline.efficiency * 100} color="var(--cyan)" /></div>
+                  <div className="faint" style={{ fontSize: 12.5, lineHeight: 1.5 }}>Ceiling ≈ {fmt(r.performance.roofline.theoretical_tps, 0)} tok/s on {r.performance.roofline.gpu_count}× {r.performance.roofline.gpu}. Plain decoding cannot exceed it — only speculation, quantisation or a faster GPU can.</div>
+                </>
+              ) : <div className="faint">Roofline unavailable for this endpoint.</div>}
+              <div className="kv" style={{ marginTop: 14 }}>
+                <div><span className="k">GPU</span><span className="v">{r.environment.requested_gpu ?? r.environment.gpu ?? "—"}</span></div>
+                <div><span className="k">Engine</span><span className="v">{r.environment.engine} {r.environment.engine_version}</span></div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -201,7 +227,7 @@ export function Report({ run }: { run: RunFull }) {
         <TestsTable tests={r.tests} />
       </div>
 
-      <div className="footer">Run {r.run_id} · {r.duration_s}s · {new Date(r.generated_at).toLocaleString()} · {r.environment.command && <span className="mono">{r.environment.command.split("\n")[0].slice(0, 90)}</span>}</div>
+      <div className="footer">{providerLabel(r.options.provider)} · Run {r.run_id} · {r.duration_s}s · {new Date(r.generated_at).toLocaleString()} · {r.environment.command && <span className="mono">{r.environment.command.split("\n")[0].slice(0, 90)}</span>}</div>
     </>
   );
 }
@@ -228,3 +254,21 @@ function Compare({ a, b }: { a: R; b: R }) {
 }
 
 export { Sparkline };
+
+
+function StressCheck({ r }: { r: R }) {
+  const c = r.coherency;
+  const kind = r.options.stress;
+  const fired = kind === "garble" ? c.garble_rate >= 0.3 || c.severe_rate >= 0.4 : c.repetition_rate >= 0.2 || c.runaway_rate >= 0.2 || c.severe_rate >= 0.3;
+  return (
+    <div className={`banner ${fired ? "ok" : "err"}`} style={{ marginTop: 16 }} role="status">
+      <Icon name={fired ? "check" : "alert"} size={18} />
+      <div>
+        <b>Detector self-check — {kind === "garble" ? "temperature 2.0" : "negative repetition penalties"}.</b>{" "}
+        {fired
+          ? <>Working as intended: {kind === "garble" ? `garbling was flagged in ${pct(c.garble_rate)} of responses` : `repetition/runaway output was flagged in ${pct(Math.max(c.repetition_rate, c.runaway_rate))} of responses`}, {pct(c.severe_rate)} of all responses had serious problems, and the verdict dropped to “{r.verdict.title}”. The same model without the stress control is the baseline to compare against.</>
+          : <>The corruption was <b>not</b> reliably flagged ({pct(c.severe_rate)} serious). The provider may have clamped the settings — check a few responses in the table below before trusting this run.</>}
+      </div>
+    </div>
+  );
+}

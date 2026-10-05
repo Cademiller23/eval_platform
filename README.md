@@ -1,6 +1,7 @@
 # Coherence Lab — model evaluation platform
 
-Pick a model from a dropdown. The platform boots it on [Modal](https://modal.com) GPUs (vLLM), runs a full
+Pick a model from a dropdown. The platform boots it on [Modal](https://modal.com) GPUs (vLLM) — or calls it through
+[OpenRouter](https://openrouter.ai) / any OpenAI-compatible endpoint — runs a full
 **coherency / garble** test plus **coding, math and general-purpose** suites, measures **decode tokens/s** and
 **TTFT**, detects whether **speculative decoding** is in use, and finishes with a scorecard, a ship/no-ship
 verdict, and model-specific instructions for adding speculative decoding, making the model faster and making
@@ -38,10 +39,51 @@ minutes). Weights are cached in a Modal Volume, so later cold starts are much fa
 (`EVAL_MODAL_SCALEDOWN`). You pay for GPU time while it is up; the *Quick mode* toggle runs 16 representative
 tests instead of 38.
 
+### Evaluate hosted models through OpenRouter
+
+1. Create a key at <https://openrouter.ai/keys> and `export OPENROUTER_API_KEY=sk-or-…` before starting the server
+   (or paste it into *Run options → OpenRouter API key*; it stays in that browser tab's session storage and is never
+   stored by the server or written to reports).
+2. Choose **OpenRouter** in *Run options*; the dropdown then lists OpenRouter's live model catalogue with context
+   length and prices (featured models first, any `vendor/model` slug can be pasted).
+3. Pick a model — it starts immediately. Turn on **Compare several models** to tick up to 4 models and get a
+   side-by-side leaderboard, radar chart and takeaways.
+
+What is different on a hosted API (and clearly labelled in the report): tokens/s and TTFT are measured **client-side**
+(network + provider queueing included), the serving **engine is invisible** so speculative decoding is reported as
+*cannot be observed* rather than guessed, cost comes from OpenRouter's `usage.cost`, the serving **provider** is recorded
+per request (garbling is often provider-specific), and 429/5xx are retried with back-off. Coherency, coding, maths and
+general scores are fully valid on hosted models. Open-weight models still get a self-hosting speculative-decoding
+recipe; closed models get provider-routing advice instead.
+
 ### Evaluate a server you already run
 
 Run options → *Custom endpoint* → base URL of any OpenAI-compatible server (vLLM, SGLang, TGI, Ollama,
 LM Studio…). Speculative decoding is then inferred from `/metrics` (vLLM/SGLang) and token-arrival behaviour.
+
+## Verifying that the suite itself is right
+
+A scorecard is only useful if the checker can trust it. This repo ships the machinery to *prove* it, at four levels:
+
+| Level | Command | What it establishes |
+|---|---|---|
+| **Real model outputs** | `python scripts/grade_recordings.py` | `verification/raw/*.md` holds the answers four different real models gave to all 41 evaluation prompts (38 tests + 3 open-ended generation probes). Graded result: **151/152** tests correct (4 models × 38 tests); the single miss is a *true* catch (a 41-word story against an "under 40 words" constraint); **0 false alarms** (0/152 real responses flagged as garbled, looping or leaking). |
+| **Mutation testing** | `make test` (`test_real_recordings.py`) | Those real responses are corrupted programmatically — word-salad, loops, leaked `<\|im_end\|>` tokens, language drift, unterminated `<think>`, empty output, `�` bytes, runaway generation, wrong math answers, broken code — and the suite must catch ≥99%: measured **1008/1008** injected corruptions caught (100% for every corruption type) and **148/148** wrong answers rejected by the graders. |
+| **Format tolerance** | `make test` (`test_robustness.py`) | Valid answers in many phrasings pass (`**Answer:** 240`, `\boxed{}`, `16.7%`, ` ```python3` fences, NFD-accented text…); wrong answers fail (`"aurum"` ≠ `Au`, `None` ≠ `False`); realistic markdown / LaTeX / emoji / CJK text is not flagged. |
+| **Live hosted models** | `python scripts/verify_openrouter.py` | Evaluates a strong→weak spread of real OpenRouter models (default: GPT-4o-mini, Llama 3.3 70B, Llama 3.1 8B, Llama 3.2 1B), then runs two **stress controls** on the best one — temperature 2.0 (must produce flagged garbling) and negative repetition penalties (must produce flagged loops) — and asserts: strong ≫ weak, detectors fire on *real* corruption, no false alarms on high scorers, honest hosted semantics, cost tracking (`--repeat` adds reproducibility). It writes `verification/openrouter/{summary.md,reports/,review/}`; **read `review/*.md`** — it lists every failed test with prompt, response and failed checks so you can judge model-vs-grader. Exit code 0 = all assertions passed. A default run costs roughly cents. |
+
+The stress controls are also in the UI (*Run options → Detector self-check*): they break decoding on the same model so you can
+see the platform flag it, with a banner stating whether the detectors fired.
+
+For offline use, `python -m evalplatform.devtools.replay_server` serves those recorded real answers behind an
+OpenRouter-compatible API (set `EVAL_OPENROUTER_BASE_URL=http://127.0.0.1:9999/api/v1`, `OPENROUTER_API_KEY=test-key`),
+including 429s, mid-stream errors and emulated stress behaviour. `make e2e` drives the whole UI in a real browser against
+it (17 journey steps: dropdown → run → report → exports → stress banner → compare → history → theme → cancel →
+errors → key handling → mobile layout).
+
+> **Honesty note.** The development environment this was built in could not reach `openrouter.ai` (egress policy) and had
+> no key, so the live-OpenRouter path was verified against the protocol-faithful replay server and real recorded outputs,
+> *not* against OpenRouter itself. `scripts/verify_openrouter.py` is how you close that gap in one command.
 
 ## What gets measured
 
@@ -82,7 +124,9 @@ backend/evalplatform/
   api.py             FastAPI REST + SSE; serves the built UI
   manager.py         run lifecycle, event replay, persistence (data/runs/*.json)
   runner.py          phases: provision → warmup → perf → suites → speculative → analysis
-  providers/         modal_provider (Modal SDK) · openai_provider (any endpoint) · mock_provider (demo)
+  providers/         modal_provider (Modal SDK) · openrouter_provider · openai_provider (any endpoint) · mock_provider (demo)
+  checker.py         the verification harness behind scripts/verify_openrouter.py
+  devtools/          replay_server.py — OpenRouter-compatible server replaying recorded real answers
   suite/             tasks.py (+graders) · coherence.py (detectors) · sandbox.py (code execution)
   speculative.py     config + metrics + behaviour detection
   scoring.py         scores & verdict            recommendations.py   the advice engine
@@ -115,12 +159,13 @@ curl -XPOST localhost:8000/api/runs -H 'content-type: application/json' \
 * Heuristic detectors can false-positive on unusual-but-valid text; every flag is shown with its evidence and the
   raw response so you can judge. The default suite is deliberately small and fast — it is a sanity/regression
   gate, not a replacement for large benchmarks.
-* Tests: `make test` (detectors, graders, sandbox, speculative detection, scoring, API, OpenAI-compatible
-  streaming, Modal container code against a fake vLLM).
+* Tests: `make test` (≈ 200: detectors, graders, sandbox, speculative detection, scoring, API, OpenAI-compatible and
+  OpenRouter streaming incl. retries / mid-stream errors / key hygiene, Modal container code against a fake vLLM,
+  real-output grading and mutation tests); `make e2e` for the browser journey; `make verify` for live OpenRouter.
 
 ## Configuration
 
-See `.env.example`. Useful variables: `EVAL_DEFAULT_PROVIDER`, `EVAL_MODAL_APP`, `EVAL_VLLM_VERSION` (deploy
+See `.env.example`. Useful variables: `OPENROUTER_API_KEY`, `EVAL_OPENROUTER_BASE_URL`, `EVAL_OPENROUTER_CONCURRENCY`, `EVAL_DEFAULT_PROVIDER`, `EVAL_MODAL_APP`, `EVAL_VLLM_VERSION` (deploy
 time), `EVAL_MODAL_SCALEDOWN`, `EVAL_MODAL_MAX_CONTAINERS`, `EVAL_PORT`, `EVAL_DATA_DIR`, `EVAL_MOCK_PACE`, `EVAL_HOST`, `EVAL_CORS_ORIGINS`.
 
 **Security:** the server has no authentication and can spend money on your Modal account, so it binds to

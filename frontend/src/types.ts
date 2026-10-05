@@ -3,18 +3,24 @@ export interface ModelInfo {
   context: number; min_gpu: string; gated: boolean; reasoning: boolean; tags: string[]; description: string;
   mtp_native: boolean; speculators: string[];
 }
-export interface ProviderInfo { id: "modal" | "openai" | "mock"; label: string; available: boolean; hint: string }
+export interface ProviderInfo { id: "modal" | "openrouter" | "openai" | "mock"; label: string; available: boolean; hint: string }
 export interface GpuInfo { id: string; mem_gb: number; bw_gbs: number; arch: string }
 export interface AppConfig {
-  version: string; default_provider: string; providers: ProviderInfo[]; gpus: GpuInfo[]; hf_token_set: boolean;
+  version: string; default_provider: string; providers: ProviderInfo[]; gpus: GpuInfo[]; hf_token_set: boolean; openrouter_key_set: boolean;
   speculative_modes: { id: string; label: string; hint: string }[]; suite: { full: number; quick: number };
 }
 export interface RunOptions {
   model_id?: string; custom_model?: { hf_repo: string; params_b?: number; reasoning?: boolean };
   provider?: string; gpu?: string; speculative?: string; speculative_custom?: string; quick?: boolean;
   max_model_len?: number; temperature?: number; endpoint?: { base_url: string; api_key?: string; model?: string };
-  parent_run_id?: string;
+  parent_run_id?: string; openrouter_model?: string; openrouter_key?: string; stress?: "garble" | "loop" | null;
 }
+export interface OrModel {
+  id: string; name: string; vendor: string; context_length: number | null; prompt_per_m: number | null; completion_per_m: number | null;
+  free: boolean; open_weights: boolean; hf_id: string | null; reasoning: boolean; description: string;
+}
+export interface OrModels { live: boolean; count: number; featured: string[]; models: OrModel[] }
+export interface OrStatus { configured: boolean; valid: boolean | null; free_tier?: boolean; usage?: number; limit?: number | null; remaining?: number | null; error?: string }
 export interface Phase { id: string; title: string; status: "pending" | "running" | "done" | "error" | "skipped"; detail: string }
 export interface Check { name: string; passed: boolean; detail: string }
 export interface Issue { kind: string; severity: "minor" | "major" | "critical"; detail: string; value?: number | null }
@@ -41,7 +47,7 @@ export interface SpecMethod {
 export interface Spec {
   status: "active" | "likely" | "not_detected" | "unknown"; headline: string; confidence: number; method: string | null;
   evidence: Evidence[]; acceptance_rate: number | null; mean_accepted_length: number | null;
-  multi_token_chunk_ratio: number; tokens_per_chunk: number; drafts: number | null; draft_tokens: number | null; accepted_tokens: number | null;
+  multi_token_chunk_ratio: number; tokens_per_chunk: number; drafts: number | null; draft_tokens: number | null; accepted_tokens: number | null; hosted?: boolean;
   copy_ratio_by_domain?: Record<string, number>; native_mtp: boolean;
 }
 export interface Step { title: string; body: string; code: string | null; lang: string | null }
@@ -56,10 +62,13 @@ export interface Environment {
   provider?: string; engine?: string; engine_version?: string; gpu?: string; gpu_names?: string[]; gpu_count?: number; requested_gpu?: string;
   max_model_len?: number; dtype?: string; quantization?: string | null; speculative_config?: Record<string, unknown> | null;
   cold_start_s?: number; provision_s?: number; command?: string; simulated?: boolean; base_url?: string;
+  hosted?: boolean; open_weights?: boolean; hf_id?: string | null; pricing?: { prompt_per_m: number | null; completion_per_m: number | null }; free_tier?: boolean;
+  providers_seen?: Record<string, number>; served_model?: string;
 }
 export interface Report {
   run_id: string; generated_at: string; duration_s: number; model: Omit<ModelInfo, "min_gpu" | "speculators">;
-  options: { provider: string; gpu: string; speculative: string; speculative_config: Record<string, unknown> | null; quick: boolean; max_model_len: number; parent_run_id?: string | null };
+  options: { provider: string; gpu: string | null; speculative: string; speculative_config: Record<string, unknown> | null; quick: boolean; max_model_len: number; parent_run_id?: string | null; stress?: string | null; openrouter_model?: string | null };
+  usage?: { cost_usd?: number | null; prompt_tokens?: number; completion_tokens?: number; providers_seen?: Record<string, number> };
   environment: Environment; scores: Scores; verdict: Verdict; domains: Record<string, { score: number; passed: number; total: number }>;
   performance: Perf; coherency: CoherencySummary; speculative: Spec; tests: TestResult[];
   recommendations: { speculative: SpecPlan; speed: Rec[]; coherence: Rec[] };

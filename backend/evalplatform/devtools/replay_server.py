@@ -37,6 +37,9 @@ PROFILES = {
     "sonnet": dict(tps=95, p_in=3.0, p_out=15.0, provider="Replay-East"),
     "opus": dict(tps=55, p_in=15.0, p_out=75.0, provider="Replay-West"),
     "fable": dict(tps=75, p_in=5.0, p_out=25.0, provider="Replay-West"),
+    # NOT a real model: a deterministic emulation of a weak model, derived from the opus recording, so that
+    # discrimination checks ("does the suite separate strong from weak?") can run offline.
+    "tiny": dict(tps=320, p_in=0.05, p_out=0.1, provider="Replay-East"),
 }
 
 
@@ -50,13 +53,37 @@ def _pieces(text: str) -> list[str]:
     return out
 
 
+def make_tiny(source: dict[str, str]) -> dict[str, str]:
+    """Emulate a weak small model from a strong model's answers (deterministic)."""
+    import hashlib
+
+    out: dict[str, str] = {}
+    for tid, text in source.items():
+        rng = random.Random(int(hashlib.sha256(tid.encode()).hexdigest()[:12], 16))
+        roll = rng.random()
+        if tid.startswith("math-") and roll < 0.55:
+            text = re.sub(r"(?i)answer:\s*[^\n]*$", "Answer: 7", text.strip())
+        elif tid.startswith("code-") and roll < 0.6:
+            text = re.sub(r"\breturn\b[^\n]*", "return None", text, count=1)
+        elif tid.startswith("gen-") and roll < 0.45:
+            text = "I'm not sure about that, it depends on the situation."
+        elif tid in ("coh-memory", "coh-needle", "coh-stop") and roll < 0.5:
+            text = "Sure! I could not find that, but let me know if there is anything else I can help you with today."
+        if rng.random() < 0.12 and not tid.startswith("code-"):
+            text += " " + " ".join("".join(rng.choice("bcdfghjklmnpqrstvwxz") for _ in range(rng.randint(4, 8))) for _ in range(25))
+        out[tid] = text
+    return out
+
+
 def load_recordings(raw_dir: Path = RAW_DIR) -> dict[str, dict[str, str]]:
     return {p.stem: parse_responses(p) for p in sorted(raw_dir.glob("*.md"))}
 
 
 def build_app(recordings: dict[str, dict[str, str]] | None = None, *, speed: float = 1.0, key: str = "test-key",
-              fail_every: int = 0, midstream_error_every: int = 0) -> FastAPI:
-    recs = recordings if recordings is not None else load_recordings()
+              fail_every: int = 0, midstream_error_every: int = 0, slow_variant: bool = False) -> FastAPI:
+    recs = dict(recordings if recordings is not None else load_recordings())
+    if "opus" in recs and "tiny" not in recs:
+        recs["tiny"] = make_tiny(recs["opus"])
     by_last_user = {t.messages[-1]["content"]: t.id for t in build_suite()}
     bench = {p: f"bench-{i + 1}" for i, p in enumerate(BENCH_PROMPTS)}
     app = FastAPI(title="OpenRouter replay server")
@@ -72,12 +99,14 @@ def build_app(recordings: dict[str, dict[str, str]] | None = None, *, speed: flo
         for name, prof in PROFILES.items():
             if name in recs:
                 data.append({
-                    "id": f"replay/{name}", "name": f"Replay: {name} (recorded real outputs)", "context_length": 200000,
-                    "description": f"Replays real {name} answers to the evaluation prompts.", "hugging_face_id": "",
+                    "id": f"replay/{name}", "name": (f"Replay: {name} (EMULATED weak model)" if name == "tiny" else f"Replay: {name} (recorded real outputs)"), "context_length": 200000,
+                    "description": ("EMULATED weak model (derived from opus answers) for discrimination checks." if name == "tiny" else f"Replays real {name} answers to the evaluation prompts."), "hugging_face_id": "",
                     "pricing": {"prompt": str(prof["p_in"] / 1e6), "completion": str(prof["p_out"] / 1e6)},
                     "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
                     "supported_parameters": ["temperature", "top_p", "frequency_penalty", "presence_penalty", "repetition_penalty", "max_tokens"],
                 })
+        if slow_variant and "opus" in recs:   # a deliberately slow model, for cancel/timeout tests
+            data.append({**next(d for d in data if d["id"] == "replay/opus"), "id": "replay/opus:slow", "name": "Replay: opus (SLOW — for cancel tests)"})
         return {"data": data}
 
     @app.get("/api/v1/key")
@@ -133,6 +162,7 @@ def build_app(recordings: dict[str, dict[str, str]] | None = None, *, speed: flo
         if model not in recs:
             return JSONResponse({"error": {"message": f"No endpoints found for {body['model']}", "code": 404}}, status_code=404)
         prof = PROFILES[model]
+        spd = speed * (0.04 if body["model"].endswith(":slow") else 1.0)
         text = pick_text(model, body["messages"])
         text, forced = degrade(text, body, seed=state["n"])
         pieces = _pieces(text)
@@ -146,10 +176,10 @@ def build_app(recordings: dict[str, dict[str, str]] | None = None, *, speed: flo
 
         async def gen():
             yield ": OPENROUTER PROCESSING\n\n"
-            await asyncio.sleep(0.02 / speed)
+            await asyncio.sleep(0.02 / spd)
             done = 0
             i = 0
-            step = max(1, round(prof["tps"] * speed / 60))   # tokens per SSE chunk ≈ what gateways emit
+            step = max(1, round(prof["tps"] * spd / 60))   # tokens per SSE chunk ≈ what gateways emit
             while i < len(pieces):
                 n = min(step, len(pieces) - i)
                 chunk = {"id": "gen-replay", "provider": prof["provider"], "model": body["model"],
@@ -160,7 +190,7 @@ def build_app(recordings: dict[str, dict[str, str]] | None = None, *, speed: flo
                 if inject_error and done > 6:
                     yield f"data: {json.dumps({'error': {'message': 'Provider disconnected', 'code': 502}, 'choices': [{'finish_reason': 'error', 'delta': {'content': ''}}]})}\n\n"
                     return
-                await asyncio.sleep(n / (prof["tps"] * speed))
+                await asyncio.sleep(n / (prof["tps"] * spd))
             yield f"data: {json.dumps({'id': 'gen-replay', 'provider': prof['provider'], 'choices': [{'index': 0, 'delta': {'content': ''}, 'finish_reason': finish}]})}\n\n"
             if want_usage:
                 cost = prompt_tokens * prof["p_in"] / 1e6 + done * prof["p_out"] / 1e6
@@ -179,8 +209,9 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=9999)
     ap.add_argument("--speed", type=float, default=1.0, help="multiply streaming speed (use 10 for fast demos)")
     ap.add_argument("--key", default="test-key")
+    ap.add_argument("--slow-variant", action="store_true", help="also serve replay/opus:slow (for cancel tests)")
     args = ap.parse_args()
-    uvicorn.run(build_app(speed=args.speed, key=args.key), host="127.0.0.1", port=args.port, log_level="warning")
+    uvicorn.run(build_app(speed=args.speed, key=args.key, slow_variant=args.slow_variant), host="127.0.0.1", port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":
