@@ -5,19 +5,25 @@ import { Badge, CodeBlock, Icon, impactTone } from "./ui";
 type Recs = Report["recommendations"];
 
 export function Recommendations({ rec, onApply, busy }: { rec: Recs; onApply?: (spec?: string) => void; busy: boolean }) {
-  const [tab, setTab] = useState<"spec" | "speed" | "coh">("spec");
+  const [tab, setTab] = useState<"spec" | "speed" | "coh" | "sys" | "samp">("spec");
   const urgent = rec.coherence.filter((r) => r.impact === "high").length;
+  const sys = rec.system ?? [], samp = rec.sampling ?? [];
+  const urgentSys = sys.filter((r) => r.impact === "high").length;
   return (
     <>
-      <div className="tabs">
+      <div className={`tabs ${sys.length + samp.length > 0 ? "many" : ""}`} role="tablist">
         <button className={tab === "spec" ? "on" : ""} onClick={() => setTab("spec")}><Icon name="bolt" size={16} /> <span className="lg">Speculative decoding</span><span className="sm-only">Speculative</span></button>
         <button className={tab === "speed" ? "on" : ""} onClick={() => setTab("speed")}><Icon name="gauge" size={16} /> <span className="lg">Make it faster</span><span className="sm-only">Faster</span> <Badge>{rec.speed.filter((r) => r.impact !== "low").length}</Badge></button>
         <button className={tab === "coh" ? "on" : ""} onClick={() => setTab("coh")}><Icon name="shield" size={16} /> <span className="lg">Make it more coherent</span><span className="sm-only">Coherence</span> {urgent > 0 && <Badge tone="red">{urgent}</Badge>}</button>
+        {sys.length > 0 && <button className={tab === "sys" ? "on" : ""} onClick={() => setTab("sys")}><Icon name="prompt" size={16} /> <span className="lg">Harden the system prompt</span><span className="sm-only">Prompts</span> {urgentSys > 0 && <Badge tone="red">{urgentSys}</Badge>}</button>}
+        {samp.length > 0 && <button className={tab === "samp" ? "on" : ""} onClick={() => setTab("samp")}><Icon name="tune" size={16} /> <span className="lg">Tune the sampling</span><span className="sm-only">Sampling</span></button>}
       </div>
       <div className="tab-body">
         {tab === "spec" && <SpecTab plan={rec.speculative} onApply={onApply} busy={busy} />}
         {tab === "speed" && rec.speed.map((r) => <RecCard key={r.id} r={r} />)}
         {tab === "coh" && rec.coherence.map((r) => <RecCard key={r.id} r={r} />)}
+        {tab === "sys" && sys.map((r) => <RecCard key={r.id} r={r} />)}
+        {tab === "samp" && samp.map((r) => <RecCard key={r.id} r={r} />)}
       </div>
     </>
   );

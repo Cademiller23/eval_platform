@@ -42,6 +42,12 @@ async def grade_recording(responses: dict[str, str]) -> list[dict[str, Any]]:
     for tid, text in responses.items():
         if tid in tasks:
             out.append(await grade_one(tasks[tid], text))
+        elif tid.startswith("samp-"):
+            from .suite.sampling import PROBES
+
+            h = analyze_text(text, kind=PROBES[tid].kind if tid in PROBES else "prose")
+            out.append({"id": tid, "domain": "sampling", "passed": not h.severe, "score": 1 - h.severity_score,
+                        "checks": [], "health": h.as_dict(), "response": text})
         elif tid.startswith("bench-"):
             h = analyze_text(text, kind="prose")
             out.append({"id": tid, "domain": "coherency", "passed": not h.severe, "score": 1 - h.severity_score,

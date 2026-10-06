@@ -100,7 +100,7 @@ async def test_full_run_report_for_hosted_closed_model(replay):
     assert rep["environment"]["hosted"] and rep["environment"]["provider"] == "openrouter"
     assert rep["verdict"]["label"] == "ready" and rep["scores"]["overall"] >= 80
     assert rep["coherency"]["severe_rate"] == 0 and rep["coherency"]["clean_ratio"] == 1
-    assert len(rep["tests"]) == 41   # 38 suite tests + 3 long-generation probes
+    assert len(rep["tests"]) == 100   # 38 core + 59 system-prompt tests + 3 long-generation probes
     # hosted semantics
     spec = rep["speculative"]
     assert spec["status"] == "unknown" and spec["hosted"] and "hosted API" in spec["headline"]
@@ -220,7 +220,14 @@ async def test_checker_passes_on_a_realistic_spread_and_writes_review_files(repl
     assert (tmp_path / "summary.md").read_text().count("✅") >= 6
     tiny_review = (tmp_path / "review" / "replay__tiny.md").read_text()
     assert "FAIL" in tiny_review and "```" in tiny_review      # failures come with prompt + response evidence
-    assert (tmp_path / "reports" / "replay__sonnet--stress-garble.json").exists()
+    best = max((r for r in res.rows if not r["label"]), key=lambda r: r["overall"])["model"].replace("/", "__")
+    assert (tmp_path / "reports" / f"{best}--stress-garble.json").exists()      # stress controls run on whichever model scored best
+    for name in ("system-prompt suite separates strong from weak models", "hyperparameter sweeps complete on every model", "temperature is honoured by every model/provider",
+                 "max_tokens and stop sequences are honoured"):
+        assert by[name].status == "PASS", (name, by[name].detail)
+    assert by["the temperature sweep exposes high-temperature breakdown on real output"].status == "WARN"       # quick mode never reaches T=2
+    assert "| System | Hyper |" in (tmp_path / "summary.md").read_text()
+    assert "[system]" in (tmp_path / "review" / "replay__tiny.md").read_text()      # review dumps show the whole conversation, system prompt included
 
 
 async def test_checker_fails_loudly_when_detectors_would_miss_corruption(replay, tmp_path, monkeypatch):

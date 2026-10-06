@@ -83,5 +83,6 @@ async def test_full_run_against_openai_compatible_endpoint(endpoint):
     # the 'model' just repeats a sentence forever → graders and detectors must notice
     assert report["verdict"]["label"] == "not_ready"
     assert report["coherency"]["repetition_rate"] > 0 or report["coherency"]["runaway_rate"] > 0
-    assert len(report["tests"]) == 19  # 16 quick-suite tests + 3 long greedy-generation probes
+    assert len(report["tests"]) == 39  # 16 core + 20 system-prompt quick tests + 3 long greedy-generation probes
+    assert report["system_prompts"]["tests"] == 20 and report["sampling"]["status"] == "ok"
     assert sum(t["id"].startswith("coh-longgen") for t in report["tests"]) == 3

@@ -61,3 +61,34 @@ def bytes_per_param(dtype: str | None, quantization: str | None = None) -> float
     if d in {"float32", "fp32"}:
         return 4.0
     return 2.0
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Sampling guidance published by model makers (model cards / generation_config.json), by catalogue family.
+# These are *starting points to compare the measured optimum against*, not ground truth: check the model card of the
+# exact checkpoint you serve. Thinking-mode variants are listed separately where the maker publishes different values.
+# ---------------------------------------------------------------------------------------------------------------
+SAMPLING_GUIDANCE: dict[str, dict] = {
+    "Llama": {"params": {"temperature": 0.6, "top_p": 0.9}, "source": "Meta generation_config.json (Llama 3.x Instruct)"},
+    "Qwen": {"params": {"temperature": 0.7, "top_p": 0.8, "top_k": 20}, "source": "Qwen model card / generation_config.json (non-thinking mode)",
+             "thinking": {"temperature": 0.6, "top_p": 0.95, "top_k": 20}},
+    "Mistral": {"params": {"temperature": 0.3}, "source": "Mistral guidance for Instruct models (low temperature; 0.15 for Small)"},
+    "Gemma": {"params": {"temperature": 1.0, "top_p": 0.95, "top_k": 64}, "source": "Google Gemma 3 model card"},
+    "Phi": {"params": {"temperature": 0.8, "top_p": 0.95}, "source": "Microsoft Phi-4 usage notes"},
+    "DeepSeek": {"params": {"temperature": 0.6, "top_p": 0.95}, "source": "DeepSeek-R1 model card (0.5–0.7; avoid greedy decoding, no system prompt)"},
+    "GLM": {"params": {"temperature": 0.6, "top_p": 0.95}, "source": "Z.ai GLM-4.5 model card"},
+    "SmolLM": {"params": {"temperature": 0.2, "top_p": 0.9}, "source": "Hugging Face SmolLM2 model card"},
+}
+
+# Generic client defaults (what you get from an OpenAI-compatible SDK without tuning).
+API_DEFAULT_SAMPLING = {"temperature": 1.0, "top_p": 1.0}
+
+
+def sampling_guidance(model: dict) -> dict | None:
+    """Maker-published sampling settings for this model's family (None for closed/hosted models without published guidance)."""
+    g = SAMPLING_GUIDANCE.get(model.get("family") or "")
+    if not g:
+        return None
+    reasoning = bool(model.get("reasoning"))
+    params = dict(g["thinking"] if (reasoning and g.get("thinking")) else g["params"])
+    return {"params": params, "source": g["source"]}

@@ -79,6 +79,8 @@ async def record(options: dict, label: str) -> dict:
         if typ == "report":
             continue
         ev = {k: v for k, v in ev.items() if k != "ts"}
+        if typ == "progress" and ev["done"] != ev["total"] and ev["done"] % max(1, ev["total"] // 30):
+            continue                                            # a hundred ticks per phase add size, not smoothness
         if typ == "phase":
             for p in phases:
                 if p["id"] == ev["id"]:

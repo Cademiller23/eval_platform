@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from evalplatform.runner import BENCH_PROMPTS  # noqa: E402
+from evalplatform.suite.sampling import PROBES  # noqa: E402
 from evalplatform.suite.tasks import build_suite  # noqa: E402
 
 
@@ -32,6 +33,9 @@ def main(out: str = "verification/prompts.md") -> None:
         lines.append("=== END ===\n")
     for i, p in enumerate(BENCH_PROMPTS, 1):
         lines += [f"=== TASK bench-{i} ===", "(open-ended: answer in roughly 180-200 words)", "[user]", p, "=== END ===\n"]
+    # the hyperparameter suite re-asks these probes at many temperatures; one answer each is enough to check the detectors
+    for pid, probe in PROBES.items():
+        lines += [f"=== TASK {pid} ===", f"(sampling probe, {probe.kind}: answer normally; the harness asks it at many settings)", "[user]", probe.prompt, "=== END ===\n"]
     Path(out).write_text("\n".join(lines), encoding="utf-8")
     print(f"wrote {out} ({len(lines)} lines)")
 

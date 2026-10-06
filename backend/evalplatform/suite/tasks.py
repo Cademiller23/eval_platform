@@ -55,7 +55,7 @@ Grader = Callable[[str, GradeCtx], "Grade | Awaitable[Grade]"]
 @dataclass
 class Task:
     id: str
-    domain: str                      # coding | math | general | coherency
+    domain: str                      # coding | math | general | coherency | system
     name: str
     messages: list[dict[str, str]]
     grader: Grader
@@ -71,9 +71,13 @@ class Task:
     difficulty: str = "medium"
     entry: str = ""                  # coding: function/class name (demo-mode helper)
     skill: str = ""                  # short label of what this probes
+    category: str = ""               # sub-score the task belongs to (system prompts: adherence, injection, ...)
+    fails: list[str] = field(default_factory=list)   # answers a correct grader must reject (self-test + demo-mode "wrong" answers)
+    health: bool = True              # False: skip text-health analysis (adversarial tasks whose *correct failure* looks like noise, e.g. base64)
 
     def public(self) -> dict[str, Any]:
-        return {"id": self.id, "domain": self.domain, "name": self.name, "difficulty": self.difficulty, "skill": self.skill}
+        return {"id": self.id, "domain": self.domain, "name": self.name, "difficulty": self.difficulty, "skill": self.skill,
+                "category": self.category}
 
 
 def user(prompt: str) -> list[dict[str, str]]:
@@ -585,12 +589,14 @@ COHERENCY_TASKS = [
 
 def build_suite(haystack_tokens: int = 3000, max_model_len: int = 8192, quick: bool = False) -> list[Task]:
     """All tasks, optionally the quick subset. The haystack is clamped to fit the context window."""
+    from .system_prompts import build_system_tasks
+
     budget = max(500, min(haystack_tokens, int(max_model_len * 0.55)))
     coh = COHERENCY_TASKS + [needle_task(budget)]
-    tasks = coh + CODING_TASKS + MATH_TASKS + GENERAL_TASKS
+    tasks = coh + CODING_TASKS + MATH_TASKS + GENERAL_TASKS + build_system_tasks()
     if quick:
         tasks = [t for t in tasks if t.quick]
     return tasks
 
 
-DOMAINS = ["coherency", "coding", "math", "general"]
+DOMAINS = ["coherency", "coding", "math", "general", "system"]

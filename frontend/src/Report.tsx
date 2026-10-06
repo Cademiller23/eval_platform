@@ -3,10 +3,22 @@ import { useNavigate } from "react-router-dom";
 import { api } from "./api";
 import { IS_DEMO } from "./env";
 import { providerLabel, savedOpenRouterKey } from "./Home";
+import { HyperparametersSection, SystemPromptsSection } from "./Modules";
 import { Recommendations } from "./Recs";
 import { TestsTable } from "./TestsTable";
 import type { Report as R, RunFull } from "./types";
-import { Badge, Bar, Icon, Radar, ScoreRing, Sparkline, fmt, pct, scoreColor } from "./ui";
+import { Badge, Bar, Icon, Radar, ScoreRing, Sparkline, fmt, pct, scoreColor, type IconName } from "./ui";
+
+/** The scored axes, in display order. `tone` colours the "how the overall score is built" bar. */
+const AXES: { key: "coherency" | "coding" | "math" | "general" | "system" | "sampling" | "performance"; label: string; icon: IconName; tone: string }[] = [
+  { key: "coherency", label: "Coherency", icon: "shield", tone: "var(--green)" },
+  { key: "coding", label: "Coding", icon: "code", tone: "var(--accent)" },
+  { key: "math", label: "Math", icon: "calc", tone: "var(--purple)" },
+  { key: "general", label: "General", icon: "chat", tone: "var(--orange)" },
+  { key: "system", label: "System prompts", icon: "prompt", tone: "var(--pink)" },
+  { key: "sampling", label: "Hyperparameters", icon: "tune", tone: "var(--indigo)" },
+  { key: "performance", label: "Speed", icon: "bolt", tone: "var(--teal)" },
+];
 
 export function Report({ run }: { run: RunFull }) {
   const r = run.report as R;
@@ -42,6 +54,7 @@ export function Report({ run }: { run: RunFull }) {
       const { run_id } = await api.start({
         ...target,
         provider: o.provider, gpu: o.gpu ?? undefined, quick: o.quick, max_model_len: o.max_model_len, stress: o.stress ?? undefined,
+        system_prompts: o.system_prompts, hyperparameters: o.hyperparameters,
         speculative: o.openrouter_model ? "auto" : spec ?? o.speculative ?? "auto", speculative_custom: o.speculative_custom,
         parent_run_id: run.id,
       });
@@ -97,35 +110,37 @@ export function Report({ run }: { run: RunFull }) {
 
       <div className="section">
         <h2>Scores</h2>
-        <div className="row" style={{ alignItems: "stretch" }}>
-          <div style={{ flex: "1 1 520px" }}>
-            <div className="score-grid">
-              {([["coherency", "Coherency", "shield"], ["coding", "Coding", "code"], ["math", "Math", "calc"], ["general", "General", "chat"], ["performance", "Speed", "bolt"]] as const).map(([k, label, ic]) => {
-                const val = s[k];
-                const d = r.domains[k];
-                return (
-                  <div className="card score-card" key={k}>
-                    <div className="lbl"><span>{label}</span><Icon name={ic} size={15} /></div>
-                    <div className="val" style={{ color: scoreColor(val) }}>{Math.round(val)}</div>
-                    <Bar value={val} />
-                    <div className="note faint">{d ? `${d.passed}/${d.total} tests passed` : k === "performance" ? `${fmt(r.performance.decode_tps_median, 0)} tok/s decode` : ""}</div>
-                  </div>
-                );
-              })}
-              <div className="card score-card">
-                <div className="lbl"><span>Pass rate</span><Icon name="check" size={15} /></div>
-                <div className="val" style={{ color: scoreColor(passRate) }}>{Math.round(passRate)}<small>%</small></div>
-                <Bar value={passRate} />
-                <div className="note faint">{passedTests} of {r.tests.length} tests overall</div>
+        <div className="score-grid">
+          {AXES.map(({ key, label, icon }) => {
+            const val = s[key];
+            const d = r.domains[key];
+            const missing = val == null;
+            return (
+              <div className={`card score-card ${missing ? "off" : ""}`} key={key}>
+                <div className="lbl"><span>{label}</span><Icon name={icon} size={15} /></div>
+                <div className="val" style={{ color: missing ? "var(--text-3)" : scoreColor(val) }}>{missing ? "—" : Math.round(val)}</div>
+                <Bar value={missing ? 0 : val} />
+                <div className="note faint">
+                  {missing ? (key === "system" ? (r.options.system_prompts === undefined ? "Not in this older run" : "Turned off for this run") : key === "sampling" ? (r.options.stress ? "Skipped during the self-check" : r.options.hyperparameters === undefined ? "Not in this older run" : "Turned off for this run") : "Not measured")
+                    : key === "performance" ? `${fmt(r.performance.decode_tps_median, 0)} tok/s decode`
+                    : key === "sampling" ? (d ? `${d.passed}/${d.total} parameters honoured` : "")
+                    : d ? `${d.passed}/${d.total} tests passed` : ""}
+                </div>
               </div>
-            </div>
+            );
+          })}
+          <div className="card score-card">
+            <div className="lbl"><span>Pass rate</span><Icon name="check" size={15} /></div>
+            <div className="val" style={{ color: scoreColor(passRate) }}>{Math.round(passRate)}<small>%</small></div>
+            <Bar value={passRate} />
+            <div className="note faint">{passedTests} of {r.tests.length} tests overall</div>
           </div>
-          <div className="card" style={{ flex: "1 1 300px", maxWidth: 380, display: "grid", placeItems: "center" }}>
-            <Radar axes={[
-              { label: "Coherency", value: s.coherency }, { label: "Coding", value: s.coding }, { label: "Math", value: s.math },
-              { label: "General", value: s.general }, { label: "Speed", value: s.performance },
-            ]} />
+        </div>
+        <div className="row" style={{ alignItems: "stretch", marginTop: 16 }}>
+          <div className="card" style={{ flex: "1 1 300px", maxWidth: 400, display: "grid", placeItems: "center" }}>
+            <Radar axes={AXES.filter((a) => s[a.key] != null).map((a) => ({ label: a.label === "System prompts" ? "System" : a.label === "Hyperparameters" ? "Sampling" : a.label, value: s[a.key] as number }))} />
           </div>
+          <ScoreBuild r={r} />
         </div>
       </div>
 
@@ -249,6 +264,9 @@ export function Report({ run }: { run: RunFull }) {
         </div>
       </div>
 
+      <SystemPromptsSection r={r} />
+      <HyperparametersSection r={r} />
+
       <div className="section">
         <h2>Make it better</h2>
         <Recommendations rec={r.recommendations} onApply={canRerun ? rerun : undefined} busy={busy} />
@@ -280,6 +298,38 @@ function Compare({ a, b }: { a: R; b: R }) {
         Compared with <b style={{ color: "var(--text)" }}>{a.options.speculative === "auto" || a.options.speculative === "none" ? "baseline" : a.options.speculative}</b> →
         <b style={{ color: "var(--text)" }}> {b.options.speculative === "auto" || b.options.speculative === "none" ? "baseline" : b.options.speculative}</b>.{" "}
         {speed && speed >= 1.2 && dCoh >= -3 ? "Faster with no coherency loss — keep it." : speed && speed < 1.05 ? "No meaningful speed-up on this workload." : dCoh < -3 ? "Quality dropped — investigate before shipping." : ""}
+      </div>
+    </div>
+  );
+}
+
+/** Shows exactly how the overall score is assembled: each axis, the share it carried and the points it contributed. */
+function ScoreBuild({ r }: { r: R }) {
+  const s = r.scores;
+  const w = r.score_weights ?? {};
+  const rows = AXES.filter((a) => s[a.key] != null && w[a.key] != null)
+    .map((a) => ({ ...a, weight: w[a.key], score: s[a.key] as number, pts: w[a.key] * (s[a.key] as number) }))
+    .sort((a, b) => b.weight - a.weight);
+  if (!rows.length) return null;
+  return (
+    <div className="card" style={{ flex: "1 1 360px" }}>
+      <h3>How the overall score is built</h3>
+      <p className="sub">A weighted mean of everything that was measured. Anything switched off drops out and the rest are re-weighted.</p>
+      <div className="stack-bar" role="img" aria-label={`Score weights: ${rows.map((x) => `${x.label} ${Math.round(x.weight * 100)}%`).join(", ")}`}>
+        {rows.map((x) => <i key={x.key} style={{ flexGrow: x.weight, background: x.tone }} title={`${x.label}: ${Math.round(x.weight * 100)}% of the score`} />)}
+      </div>
+      <div className="b-head faint"><span /><span /><span>weight</span><span>score</span><span>points</span></div>
+      <div className="build">
+        {rows.map((x) => (
+          <div className="b-row" key={x.key}>
+            <span className="sw" style={{ background: x.tone }} />
+            <span className="nm">{x.label}</span>
+            <span className="w faint num">{Math.round(x.weight * 100)}%</span>
+            <span className="sc num" style={{ color: scoreColor(x.score) }}>{Math.round(x.score)}</span>
+            <span className="pt num">{x.pts.toFixed(1)}</span>
+          </div>
+        ))}
+        <div className="b-row tot"><span /><span className="nm">Overall</span><span /><span /><span className="pt num" style={{ color: scoreColor(s.overall) }}>{s.overall.toFixed(1)}</span></div>
       </div>
     </div>
   );

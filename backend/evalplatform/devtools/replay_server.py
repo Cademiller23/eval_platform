@@ -26,21 +26,25 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..runner import BENCH_PROMPTS
+from ..suite.sampling import PROBES
 from ..suite.tasks import build_suite
 from ..verify import parse_responses
+from . import sampling_sim as sim
 
 RAW_DIR = Path(__file__).resolve().parents[3] / "verification" / "raw"
 
 # tokens/second each replay "model" streams at, and $/M-token pricing
+# ``quality`` only shapes how the *emulated* decoding settings behave (where accuracy starts to fall, where word salad starts).
 PROFILES = {
-    "haiku": dict(tps=190, ttft=0.38, p_in=0.8, p_out=4.0, provider="Replay-East"),
-    "sonnet": dict(tps=95, ttft=0.62, p_in=3.0, p_out=15.0, provider="Replay-East"),
-    "opus": dict(tps=55, ttft=1.05, p_in=15.0, p_out=75.0, provider="Replay-West"),
-    "fable": dict(tps=75, ttft=0.8, p_in=5.0, p_out=25.0, provider="Replay-West"),
+    "haiku": dict(tps=190, ttft=0.38, p_in=0.8, p_out=4.0, provider="Replay-East", quality=0.80),
+    "sonnet": dict(tps=95, ttft=0.62, p_in=3.0, p_out=15.0, provider="Replay-East", quality=0.88),
+    "opus": dict(tps=55, ttft=1.05, p_in=15.0, p_out=75.0, provider="Replay-West", quality=0.92),
+    "fable": dict(tps=75, ttft=0.8, p_in=5.0, p_out=25.0, provider="Replay-West", quality=0.90),
     # NOT a real model: a deterministic emulation of a weak model, derived from the opus recording, so that
     # discrimination checks ("does the suite separate strong from weak?") can run offline.
-    "tiny": dict(tps=320, ttft=0.22, p_in=0.05, p_out=0.1, provider="Replay-East"),
+    "tiny": dict(tps=320, ttft=0.22, p_in=0.05, p_out=0.1, provider="Replay-East", quality=0.30),
 }
+SAMPLING_PARAMS = {"temperature", "top_p", "top_k", "min_p", "seed", "frequency_penalty", "presence_penalty", "repetition_penalty", "stop"}
 
 
 def _pieces(text: str) -> list[str]:
@@ -57,10 +61,21 @@ def make_tiny(source: dict[str, str]) -> dict[str, str]:
     """Emulate a weak small model from a strong model's answers (deterministic)."""
     import hashlib
 
+    from ..suite.system_prompts import build_system_tasks
+
+    sys_tasks = {t.id: t for t in build_system_tasks()}
+    p_fail = {"adherence": 0.45, "persistence": 0.5, "hierarchy": 0.4, "injection": 0.7, "leakage": 0.7, "scope": 0.4, "capacity": 0.6, "robustness": 0.45, "identity": 0.3}
     out: dict[str, str] = {}
     for tid, text in source.items():
         rng = random.Random(int(hashlib.sha256(tid.encode()).hexdigest()[:12], 16))
         roll = rng.random()
+        if tid in sys_tasks:
+            st = sys_tasks[tid]
+            if st.fails and roll < p_fail.get(st.category, 0.5):
+                out[tid] = st.fails[0]               # a weak model breaks the rule, falls for the injection, leaks the secret ...
+                continue
+            out[tid] = text
+            continue
         if tid.startswith("math-") and roll < 0.55:
             text = re.sub(r"(?i)answer:\s*[^\n]*$", "Answer: 7", text.strip())
         elif tid.startswith("code-") and roll < 0.6:
@@ -80,11 +95,15 @@ def load_recordings(raw_dir: Path = RAW_DIR) -> dict[str, dict[str, str]]:
 
 
 def build_app(recordings: dict[str, dict[str, str]] | None = None, *, speed: float = 1.0, key: str = "test-key",
-              fail_every: int = 0, midstream_error_every: int = 0, slow_variant: bool = False) -> FastAPI:
+              fail_every: int = 0, midstream_error_every: int = 0, slow_variant: bool = False,
+              ignore_params: set[str] | None = None, reject_params: set[str] | None = None) -> FastAPI:
     recs = dict(recordings if recordings is not None else load_recordings())
     if "opus" in recs and "tiny" not in recs:
         recs["tiny"] = make_tiny(recs["opus"])
     by_last_user = {t.messages[-1]["content"]: t.id for t in build_suite()}
+    by_last_user.update({p.prompt: p.id for p in PROBES.values()})
+    ignored = set(ignore_params or ())          # emulate endpoints that silently drop parameters
+    rejected = set(reject_params or ())         # ... and endpoints that answer 400 for them
     bench = {p: f"bench-{i + 1}" for i, p in enumerate(BENCH_PROMPTS)}
     app = FastAPI(title="OpenRouter replay server")
     state = {"n": 0, "mid": 0, "requests": [], "key": key}
@@ -129,24 +148,33 @@ def build_app(recordings: dict[str, dict[str, str]] | None = None, *, speed: flo
             return "Hello there, nice to meet you!"
         return "I'm happy to help with that, but I need a little more detail to give a useful answer."
 
-    def degrade(text: str, body: dict[str, Any], seed: int) -> tuple[str, str | None]:
-        """Emulate what real models do under abusive sampling settings."""
-        rng = random.Random(seed)
-        temp = body.get("temperature") or 0
-        fp = body.get("frequency_penalty") or 0
-        if temp >= 1.5:
+    def degrade(text: str, body: dict[str, Any], seed: int, model: str = "opus", prompt: str = "") -> tuple[str, str | None]:
+        """Emulate what real models do under different decoding settings: variation with temperature, narrowing with truncation
+        samplers, repeatability with a seed, word salad when far too hot, loops under negative penalties."""
+        params = {k: v for k, v in body.items() if k in SAMPLING_PARAMS and k not in ignored}
+        q = PROFILES.get(model, {}).get("quality", 0.8)
+        temp = float(params.get("temperature") or 0.0)
+        t_eff = sim.effective_temperature(temp, params)
+        fp = float(params.get("frequency_penalty") or 0)
+        seeded = params.get("seed") if t_eff > 0 else None
+        rng = random.Random(sim.stable_int(model, prompt, round(t_eff, 3), seeded if seeded is not None else f"{seed}|{random.random()}", params.get("frequency_penalty"), params.get("repetition_penalty")))
+        if rng.random() < sim.garble_probability(t_eff, sim.salad_at(q)):
             words = text.split(" ")
             keep = max(3, len(words) // 5)
-            salad = []
-            for _ in range(max(40, len(words))):
-                salad.append("".join(rng.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(rng.randint(3, 11))))
-            junk = " ".join(rng.choice(salad) + rng.choice(["", "ñ", "ß", "я", "漢"]) for _ in range(len(salad)))
-            return " ".join(words[:keep]) + " " + junk, None
+            return " ".join(words[:keep]) + " " + sim.salad(rng, max(40, len(words))), None
         if fp <= -1:
             sentences = re.split(r"(?<=[.!?])\s+", text.strip())
             head = " ".join(sentences[: max(1, len(sentences) // 3)])
             loop = (sentences[min(len(sentences) - 1, 1)] if len(sentences) > 1 else head)[:80]
             return head + (" " + loop) * 60, "length"
+        if t_eff > 0:
+            # accuracy decays past the model's knee: swap the final numeric answer for a wrong one with the matching probability
+            p_wrong = 1.0 - sim.accuracy_factor(t_eff, sim.knee_for(q)) + sim.penalty_harm(params)
+            if "Answer:" in text and rng.random() < p_wrong:
+                text = re.sub(r"(Answer:\s*)[-\d.,/%$ ]+", lambda m: m.group(1) + "7777", text, count=1)
+            text = sim.perturb(text, t_eff, rng)
+        if sim.penalty_strength(params) != (0.0, 1.0):
+            text = sim.penalised_repetition(text, params)
         return text, None
 
     @app.post("/api/v1/chat/completions")
@@ -161,10 +189,16 @@ def build_app(recordings: dict[str, dict[str, str]] | None = None, *, speed: flo
         model = body["model"].split("/", 1)[-1].split(":")[0]
         if model not in recs:
             return JSONResponse({"error": {"message": f"No endpoints found for {body['model']}", "code": 404}}, status_code=404)
+        bad = sorted(k for k in rejected if k in body)
+        if bad:
+            return JSONResponse({"error": {"message": f"Unsupported parameter: {bad[0]}", "code": 400}}, status_code=400)
         prof = PROFILES[model]
         spd = speed * (0.04 if body["model"].endswith(":slow") else 1.0)
         text = pick_text(model, body["messages"])
-        text, forced = degrade(text, body, seed=state["n"])
+        text, forced = degrade(text, body, seed=state["n"], model=model, prompt=body["messages"][-1]["content"])
+        text, stopped = sim.apply_stop(text, body["stop"]) if body.get("stop") and "stop" not in ignored else (text, False)
+        if stopped:
+            forced = "stop"
         pieces = _pieces(text)
         max_tokens = body.get("max_tokens") or 1024
         finish = forced or "stop"
@@ -211,8 +245,12 @@ def main() -> None:
     ap.add_argument("--speed", type=float, default=1.0, help="multiply streaming speed (use 10 for fast demos)")
     ap.add_argument("--key", default="test-key")
     ap.add_argument("--slow-variant", action="store_true", help="also serve replay/opus:slow (for cancel tests)")
+    ap.add_argument("--ignore-params", default="", help="comma list of sampling parameters to silently drop, e.g. seed,top_k (emulates a gateway)")
+    ap.add_argument("--reject-params", default="", help="comma list of sampling parameters answered with HTTP 400")
     args = ap.parse_args()
-    uvicorn.run(build_app(speed=args.speed, key=args.key, slow_variant=args.slow_variant), host="127.0.0.1", port=args.port, log_level="warning")
+    split = lambda v: {x.strip() for x in v.split(",") if x.strip()}  # noqa: E731
+    uvicorn.run(build_app(speed=args.speed, key=args.key, slow_variant=args.slow_variant, ignore_params=split(args.ignore_params), reject_params=split(args.reject_params)),
+                host="127.0.0.1", port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":

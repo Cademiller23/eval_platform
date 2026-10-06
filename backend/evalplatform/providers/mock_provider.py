@@ -16,6 +16,7 @@ import random
 import re
 from typing import Any, AsyncIterator
 
+from ..devtools import sampling_sim as sim
 from ..knowledge import GPUS, bytes_per_param, parse_gpu, roofline_tps
 from .base import LaunchSpec, Provider, ProgressFn, Session
 
@@ -24,9 +25,17 @@ from .base import LaunchSpec, Provider, ProgressFn, Session
 MODEL_FLAWS: dict[str, list[str]] = {
     "smollm2-1.7b": ["repeat", "leak"],
     "llama-3.2-1b": ["repeat"],
-    "r1-distill-qwen-7b": ["think"],
+    "r1-distill-qwen-7b": ["think", "greedy_loop"],          # R1 distills are documented to loop under greedy decoding
+    "r1-distill-qwen-32b": ["greedy_loop"],
+    "gemma-2-9b": ["nosystem"],                              # the Gemma 2 chat template has no system role
+    "qwen3-30b-a3b": ["nondet"], "deepseek-r1": ["nondet"], "glm-4.5-air": ["nondet"],   # MoE routing makes batch-variance visible at T=0
 }
-KEYWORD_FLAWS = {"broken": ["garble", "leak"], "garble": ["garble"], "loop": ["repeat"], "leaky": ["leak"], "think": ["think"]}
+KEYWORD_FLAWS = {"broken": ["garble", "leak"], "garble": ["garble"], "loop": ["repeat"], "leaky": ["leak"], "think": ["think"],
+                 "noseed": ["noseed"], "notopk": ["notopk"], "nondet": ["nondet"], "nosystem": ["nosystem"], "inject": ["inject"], "greedyloop": ["greedy_loop"]}
+
+# Extra difficulty for the harder system-prompt tasks (added to the task's own difficulty offset).
+SYSTEM_CATEGORY_OFFSET = {"injection": -0.08, "leakage": -0.06, "capacity": 0.0, "persistence": -0.03}
+SYSTEM_TASK_OFFSET = {"sys-cap-15": -0.12, "sys-cap-25": -0.3, "sys-inj-transcript": -0.1, "sys-leak-roleplay": -0.05, "sys-leak-encode": -0.05}
 
 SPEC_ACCEPT = {"ngram": 1.55, "eagle3": 2.7, "eagle": 2.3, "mtp": 1.85, "draft_model": 2.2, "custom": 2.0}
 DOMAIN_NGRAM = {"coding": 2.4, "general": 1.5, "math": 1.35, "coherency": 1.6}
@@ -118,9 +127,14 @@ class MockSession(Session):
     def _success_prob(self, task) -> float:
         q = self.model.get("mock_quality", 0.6) + self.model.get("mock_bias", {}).get(task.domain, 0.0)
         q += {"easy": 0.18, "medium": 0.0, "hard": -0.22}.get(task.difficulty, 0.0)
+        floor = 0.03
+        if getattr(task, "domain", "") == "system":
+            q += SYSTEM_CATEGORY_OFFSET.get(task.category, 0.0) + SYSTEM_TASK_OFFSET.get(task.id, 0.0)
+            if "inject" in self._flaws and task.category == "injection":
+                q, floor = 0.0, 0.0                              # a model that obeys injected instructions, every time
         if "garble" in self._flaws:
             q -= 0.25
-        return max(0.03, min(0.985, q))
+        return max(floor, min(0.985, q))
 
     def _answer(self, task, seed: str) -> tuple[str, str | None]:
         """Return (text, forced_finish_reason)."""
@@ -151,6 +165,12 @@ class MockSession(Session):
         return text, forced
 
     def _wrong(self, task) -> str:
+        if task.domain == "system":
+            if not task.fails:
+                return "I'm not sure what you mean."
+            if "inject" in self._flaws and task.category == "injection":
+                return task.fails[0]                             # by construction fails[0] of an injection task is the hijacked output
+            return task.fails[0 if _u(self.model["id"], task.id, "which") < 0.5 else len(task.fails) - 1]
         if task.domain == "math":
             m = re.search(r"Answer:\s*([-\d.]+)", task.reference)
             try:
@@ -183,21 +203,79 @@ class MockSession(Session):
         return "I'm not entirely sure, but I think the answer depends on the context."
 
     # ------------------------------------------------------------------ streaming
+    def _sampling_answer(self, messages, temperature, extra) -> tuple[str, str | None]:
+        """Behaviour for the hyperparameter suite: temperature, truncation, seeds, penalties and word salad."""
+        from ..suite.sampling import PROBES
+        from ..suite.tasks import build_suite
+
+        if not hasattr(self, "_by_prompt"):
+            self._by_prompt = {t.messages[-1]["content"]: t for t in build_suite()}
+            self._probe_by_prompt = {p.prompt: p for p in PROBES.values()}
+        ex = extra or {}
+        prompt = messages[-1]["content"]
+        q = self.model.get("mock_quality", 0.6)
+        t_eff = sim.effective_temperature(temperature, ex)
+        if "noseed" in self._flaws:
+            ex = {k: v for k, v in ex.items() if k != "seed"}
+        if t_eff == 0 and "nondet" in self._flaws and _u(self.model["id"], prompt, os.urandom(4).hex()) < 0.5:
+            t_eff = 0.3                                         # batch-variance jitter at temperature 0
+        seed = ex.get("seed") if t_eff > 0 else 0
+        rng = random.Random(sim.stable_int(self.model["id"], prompt, round(t_eff, 3), seed if seed is not None else os.urandom(8).hex(), ex.get("frequency_penalty"), ex.get("repetition_penalty")))
+        knee, salad_t = sim.knee_for(q), sim.salad_at(q)
+        garbled = rng.random() < sim.garble_probability(t_eff, salad_t)
+        if prompt in self._by_prompt:
+            task = self._by_prompt[prompt]
+            if garbled:
+                return sim.salad(rng, 60), "length"
+            base = self._success_prob(task)
+            if temperature == 0 and t_eff == 0:
+                ok = _u(self.model["id"], task.id, "ok") < base
+            else:
+                ok = rng.random() < max(0.0, base * sim.accuracy_factor(t_eff, knee) - sim.penalty_harm(ex))
+            return (task.reference if ok else self._wrong(task)), None
+        probe = self._probe_by_prompt.get(prompt)
+        if probe is None:
+            return "I'm happy to help with that.", None
+        if probe.id == "samp-stop":
+            return probe.reference, None
+        if probe.id == "samp-len":
+            return probe.reference, None
+        if probe.id == "samp-rep":
+            if "repeat" in self._flaws and sim.penalty_strength(ex) == (0.0, 1.0):
+                return "This bottle is made of steel. " * 40, "length"
+            return sim.penalised_repetition(probe.reference, ex), None
+        if garbled:
+            return sim.salad(rng), "length"
+        if t_eff == 0 and "greedy_loop" in self._flaws:
+            return probe.reference[:70] + " the same words again and again" * 30, "length"
+        return sim.perturb(probe.reference, t_eff, rng), None
+
     async def stream(self, messages, *, max_tokens, temperature, meta=None, extra=None) -> AsyncIterator[dict[str, Any]]:
         task = (meta or {}).get("task")
         prompt_chars = sum(len(m["content"]) for m in messages)
         prompt_tokens = max(8, prompt_chars // 4)
         seed = f"{(meta or {}).get('seed', '')}"
-        if task is not None:
+        if "nosystem" in self._flaws and any(m["role"] == "system" for m in messages):
+            yield {"error": "HTTP 400: System role not supported"}
+            return
+        if "notopk" in self._flaws and extra and "top_k" in extra:
+            yield {"error": "HTTP 400: Unsupported parameter: top_k"}
+            return
+        forced_stop = False
+        if (meta or {}).get("sampling"):
+            text, forced = self._sampling_answer(messages, temperature, extra)
+        elif task is not None:
             text, forced = self._answer(task, seed + str(temperature))
         else:  # synthetic benchmark prompts: long, varied, coherent filler
             r0 = random.Random(f"bench|{self.model['id']}|{seed}")
             pool = BENCH_SENTENCES[:]
             r0.shuffle(pool)
             text, forced = " ".join(pool + [x.replace("the", "this", 1) for x in pool[:6]]), None
+        if extra and extra.get("stop"):
+            text, forced_stop = sim.apply_stop(text, extra["stop"])
         pieces = _tokens(text)
         rng = random.Random(f"{self.model['id']}|{seed}|{len(pieces)}|{prompt_chars}")
-        finish = forced or "stop"
+        finish = "stop" if forced_stop else (forced or "stop")
         if len(pieces) > max_tokens:
             pieces = pieces[:max_tokens]
             finish = "length"

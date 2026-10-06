@@ -13,6 +13,9 @@ const COLS: Col[] = [
   { key: "coding", label: "Coding", get: (r) => r.report?.scores.coding ?? null, fmt: (v) => v.toFixed(0), best: "max" },
   { key: "math", label: "Math", get: (r) => r.report?.scores.math ?? null, fmt: (v) => v.toFixed(0), best: "max" },
   { key: "general", label: "General", get: (r) => r.report?.scores.general ?? null, fmt: (v) => v.toFixed(0), best: "max" },
+  { key: "system", label: "System", hint: "How well it follows a system prompt: format, persistence, hierarchy, injection, leaks, scope", get: (r) => r.report?.scores.system ?? null, fmt: (v) => v.toFixed(0), best: "max" },
+  { key: "sampling", label: "Sampling", hint: "Robustness to decoding settings, honoured parameters, determinism", get: (r) => r.report?.scores.sampling ?? null, fmt: (v) => v.toFixed(0), best: "max" },
+  { key: "asr", label: "Injection ↓", hint: "Share of prompt-injection attacks that worked (lower is better)", get: (r) => { const a = r.report?.system_prompts?.metrics.injection_asr; return a == null ? null : a * 100; }, fmt: (v) => `${v.toFixed(0)}%`, best: "min" },
   { key: "tps", label: "Tok/s", hint: "Decode tokens per second (median)", get: (r) => r.report?.performance.decode_tps_median ?? null, fmt: (v) => v.toFixed(0), best: "max" },
   { key: "ttft", label: "TTFT (ms)", hint: "Time to first token, median", get: (r) => r.report?.performance.ttft_ms_p50 ?? null, fmt: (v) => v.toFixed(0), best: "min" },
   { key: "cost", label: "Run cost", get: (r) => r.report?.usage?.cost_usd ?? null, fmt: (v) => `$${v < 0.1 ? v.toFixed(4) : v.toFixed(2)}`, best: "min" },
@@ -67,6 +70,11 @@ export function Compare() {
   }, [runs]);
   const label = (r: RunFull) => labels.get(r.id) ?? r.model.name;
 
+  // an axis is drawn only when every compared run measured it (older runs predate System prompts and Hyperparameters)
+  const radarAxes = ([["coherency", "Coherency"], ["coding", "Coding"], ["math", "Math"], ["general", "General"], ["system", "System"], ["sampling", "Sampling"], ["performance", "Speed"]] as const)
+    .map(([key, label]) => ({ key, label }))
+    .filter((a) => sorted.length > 0 && sorted.every((r) => r.report!.scores[a.key] != null));
+
   const bestOf = (c: Col) => {
     const vals = sorted.map((r) => c.get(r)).filter((v): v is number => v != null);
     if (vals.length < 2) return null;
@@ -91,6 +99,19 @@ export function Compare() {
       : ov.length > 1 ? `${list(ov)} tie for the top overall score (${ov[0].report!.scores.overall.toFixed(1)}).` : `${name(ov[0])} leads overall at ${ov[0].report!.scores.overall.toFixed(1)}/100.`);
     const coh = leaders(col("coherency"), "max", 0.5);
     out.push(coh.length === sorted.length ? "All models are equally coherent." : coh.length > 1 ? `Most coherent (tie): ${list(coh)}.` : `Most coherent: ${name(coh[0])} (${coh[0].report!.scores.coherency.toFixed(0)}).`);
+    const hasTwo = (k: string) => sorted.filter((r) => col(k).get(r) != null).length >= 2;
+    if (hasTwo("system")) {
+      const sy = leaders(col("system"), "max", 0.5);
+      out.push(sy.length === sorted.length ? "All models follow system prompts equally well." : sy.length > 1 ? `Best at following system prompts (tie): ${list(sy)}.` : `Best at following system prompts: ${name(sy[0])} (${col("system").get(sy[0])!.toFixed(0)}/100).`);
+    }
+    if (hasTwo("asr")) {
+      const safe = leaders(col("asr"), "min", 0.5), risky = leaders(col("asr"), "max", 0.5);
+      if (safe.length < sorted.length) out.push(`Most resistant to prompt injection: ${list(safe)} (${col("asr").get(safe[0])!.toFixed(0)}% of attacks worked)${risky.length === 1 && col("asr").get(risky[0])! >= 50 ? `; ${name(risky[0])} was hijacked ${col("asr").get(risky[0])!.toFixed(0)}% of the time` : ""}.`);
+    }
+    if (hasTwo("sampling")) {
+      const sa = leaders(col("sampling"), "max", 0.5);
+      if (sa.length < sorted.length) out.push(`Most robust to sampling changes: ${list(sa)} (${col("sampling").get(sa[0])!.toFixed(0)}/100).`);
+    }
     const fast = leaders(col("tps"), "max", 0), slow = leaders(col("tps"), "min", 0);
     if (fast.length === 1 && slow.length === 1 && fast[0] !== slow[0] && slow[0].report!.performance.decode_tps_median)
       out.push(`Fastest: ${name(fast[0])} at ${fmt(fast[0].report!.performance.decode_tps_median, 0)} tok/s — ${(fast[0].report!.performance.decode_tps_median! / slow[0].report!.performance.decode_tps_median!).toFixed(1)}× ${name(slow[0])}.`);
@@ -144,7 +165,7 @@ export function Compare() {
             <div className="card" style={{ padding: 0, overflow: "hidden" }}>
               <div className="scroll-x">
                 <table className="table cmp">
-                  <thead><tr><th>#</th><th className="model">Model</th><th className="v-col">Verdict</th>{COLS.map((c) => <th key={c.key} title={c.hint}>{c.label}</th>)}</tr></thead>
+                  <thead><tr><th>#</th><th className="model">Model</th>{COLS.map((c) => <th key={c.key} title={c.hint}>{c.label}</th>)}</tr></thead>
                   <tbody>
                     {sorted.map((r, i) => (
                       <tr key={r.id}>
@@ -156,7 +177,6 @@ export function Compare() {
                           <div className="faint" style={{ fontSize: 11.5, marginLeft: 19 }}>{providerLabel(r.options.provider)} · {variantLabel(r.options)}</div>
                           <div className="v-inline"><Badge tone={verdictTone(r.report!.verdict.label)}>{r.report!.verdict.title}</Badge></div>
                         </td>
-                        <td className="v-col"><Badge tone={verdictTone(r.report!.verdict.label)}>{r.report!.verdict.title}</Badge></td>
                         {COLS.map((c) => {
                           const v = c.get(r);
                           const best = bestOf(c);
@@ -179,8 +199,8 @@ export function Compare() {
             <h2>Profile</h2>
             <div className="row" style={{ alignItems: "flex-start" }}>
               <div className="card" style={{ flex: "0 1 420px", display: "grid", placeItems: "center" }}>
-                <MultiRadar axes={["Coherency", "Coding", "Math", "General", "Speed"]}
-                  series={sorted.map((r) => ({ label: label(r), color: color(r.id), values: [r.report!.scores.coherency, r.report!.scores.coding, r.report!.scores.math, r.report!.scores.general, r.report!.scores.performance] }))} />
+                <MultiRadar axes={radarAxes.map((a) => a.label)}
+                  series={sorted.map((r) => ({ label: label(r), color: color(r.id), values: radarAxes.map((a) => r.report!.scores[a.key] as number) }))} />
                 <div className="legend">{sorted.map((r) => <span key={r.id}><i style={{ background: color(r.id) }} />{label(r)}</span>)}</div>
               </div>
               <div className="card" style={{ flex: "1 1 320px" }}>

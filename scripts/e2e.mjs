@@ -83,14 +83,23 @@ await step("selecting a model starts a run immediately and shows live progress",
   await page.waitForURL(/\/runs\//);
   runUrl = page.url();
   await page.waitForSelector(".stepper .step");
-  expect((await page.locator(".stepper .step").count()) === 9, "stepper should have 9 phases");
+  expect((await page.locator(".stepper .step").count()) === 11, "stepper should have 11 phases");
 });
 await step("report appears with verdict, scores, cost card and recommendations", async () => {
   await page.waitForSelector(".verdict", { timeout: 120000 });
   expect((await page.textContent(".verdict h2")).includes("Ready"), "verdict should be Ready for a strong model");
   const text = await page.textContent("body");
-  for (const s of ["Coherency", "Coding", "Cost & provider", "Speculative decoding", "Implementation steps", "Hosted API run"]) expect(text.includes(s), `missing section: ${s}`);
-  expect((await page.locator(".tabs button").count()) === 3, "recommendation tabs missing");
+  for (const s of ["Coherency", "Coding", "Cost & provider", "Speculative decoding", "Implementation steps", "Hosted API run", "System prompts", "Hyperparameters", "How the overall score is built"]) expect(text.includes(s), `missing section: ${s}`);
+  expect((await page.locator(".tabs button").count()) >= 4, "recommendation tabs missing");
+});
+await step("system-prompt and hyperparameter sections are populated from the real run", async () => {
+  expect((await page.locator("#system-prompts .cat").count()) === 9, "nine system-prompt categories");
+  expect((await page.locator("#hyperparameters .profile").count()) === 3, "three tuned profiles");
+  await page.waitForSelector("#hyperparameters .chart svg path");
+  // a category row opens the matching test with the conversation that was sent
+  if (!(await page.locator("#system-prompts .tlist button:visible").count())) await page.locator("#system-prompts details.tgood summary").first().click();
+  await page.locator("#system-prompts .tlist button:visible").first().click();
+  await page.waitForSelector(".detail .conv .msg.system", { timeout: 5000 });
 });
 await step("recommendation tabs switch and test rows expand with evidence", async () => {
   await page.click(".tabs button:has-text('Make it more coherent')"); await page.waitForSelector(".rec");
@@ -192,7 +201,8 @@ await step("invalid input is rejected with a message (hosted + speculative)", as
 });
 await step("mobile layout has no horizontal overflow on any main screen", async () => {
   const m = await (await browser.newContext({ viewport: { width: 390, height: 844 }, colorScheme: "dark" })).newPage();
-  for (const p of ["/", "/history", `/compare?ids=${(await (await fetch(`${BASE}/api/runs`)).json()).slice(0, 2).map((r) => r.id).join(",")}`]) {
+  const done = (await (await fetch(`${BASE}/api/runs`)).json()).filter((r) => r.status === "completed");
+  for (const p of ["/", "/history", `/runs/${done[0].id}`, `/compare?ids=${done.slice(0, 2).map((r) => r.id).join(",")}`]) {
     await m.goto(BASE + p, { waitUntil: "networkidle" }); await m.waitForTimeout(400);
     const w = await m.evaluate(() => document.documentElement.scrollWidth);
     expect(w <= 392, `${p} overflows horizontally (${w}px)`);

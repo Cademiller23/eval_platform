@@ -1,20 +1,33 @@
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import type { TestResult } from "./types";
 import { Badge, fmt } from "./ui";
 
-const DOMAINS = ["all", "coherency", "coding", "math", "general"] as const;
+const DOMAINS = ["all", "coherency", "coding", "math", "general", "system"] as const;
+const LABEL: Record<string, string> = { system: "System prompts" };
+const ROLE: Record<string, string> = { system: "System", user: "User", assistant: "Assistant" };
 
 export function TestsTable({ tests }: { tests: TestResult[] }) {
   const [dom, setDom] = useState<(typeof DOMAINS)[number]>("all");
   const [open, setOpen] = useState<string | null>(null);
   const [onlyFail, setOnlyFail] = useState(false);
+  // a category card elsewhere on the page asks for one test to be opened
+  useEffect(() => {
+    const on = (e: Event) => {
+      const id = (e as CustomEvent<string>).detail;
+      setDom("all"); setOnlyFail(false); setOpen(id);
+      setTimeout(() => document.getElementById(`test-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 60);
+    };
+    window.addEventListener("open-test", on);
+    return () => window.removeEventListener("open-test", on);
+  }, []);
+  const doms = DOMAINS.filter((d) => d === "all" || tests.some((t) => t.domain === d));
   const rows = tests
     .filter((t) => (dom === "all" || t.domain === dom) && (!onlyFail || !t.passed || t.health?.severe))
     .sort((a, b) => a.domain.localeCompare(b.domain) || a.id.localeCompare(b.id));
   return (
     <div className="card" style={{ padding: 0, overflow: "hidden" }}>
       <div style={{ padding: "16px 18px 0" }} className="filters">
-        {DOMAINS.map((d) => <button key={d} className={dom === d ? "on" : ""} onClick={() => setDom(d)}>{d === "all" ? `All (${tests.length})` : `${d[0].toUpperCase()}${d.slice(1)} (${tests.filter((t) => t.domain === d).length})`}</button>)}
+        {doms.map((d) => <button key={d} className={dom === d ? "on" : ""} onClick={() => setDom(d)}>{d === "all" ? `All (${tests.length})` : `${LABEL[d] ?? `${d[0].toUpperCase()}${d.slice(1)}`} (${tests.filter((t) => t.domain === d).length})`}</button>)}
         <button className={onlyFail ? "on" : ""} onClick={() => setOnlyFail(!onlyFail)} style={{ marginLeft: "auto" }}>Only problems</button>
       </div>
       <div className="scroll-x">
@@ -23,13 +36,13 @@ export function TestsTable({ tests }: { tests: TestResult[] }) {
           <tbody>
             {rows.map((t) => (
               <Fragment key={t.id}>
-                <tr className="t-row" onClick={() => setOpen(open === t.id ? null : t.id)}>
+                <tr className="t-row" id={`test-${t.id}`} onClick={() => setOpen(open === t.id ? null : t.id)}>
                   <td className="c-name">
                     <div style={{ fontWeight: 600, letterSpacing: "-0.012em" }}>{t.name}</div>
-                    <div className="faint" style={{ fontSize: 12 }}>{t.domain} · {t.skill} · {t.difficulty}</div>
+                    <div className="faint" style={{ fontSize: 12 }}>{t.category ?? t.domain} · {t.skill} · {t.difficulty}</div>
                     {!!t.health?.issues.length && <div className="mobile-only">{t.health.issues.slice(0, 2).map((i) => <Badge key={i.kind} tone={i.severity === "minor" ? "amber" : "red"}>{i.kind.replace(/_/g, " ")}</Badge>)}</div>}
                   </td>
-                  <td className="c-domain"><Badge>{t.domain}</Badge></td>
+                  <td className="c-domain"><Badge>{t.domain === "system" ? "system prompt" : t.domain}</Badge></td>
                   <td>{t.passed ? <Badge tone="green">Pass</Badge> : t.score > 0 ? <Badge tone="amber">Partial {Math.round(t.score * 100)}%</Badge> : <Badge tone="red">Fail</Badge>}</td>
                   <td className="c-health">{t.health?.issues.length ? t.health.issues.slice(0, 3).map((i) => <Badge key={i.kind} tone={i.severity === "minor" ? "amber" : "red"}>{i.kind.replace(/_/g, " ")}</Badge>) : <Badge tone="green">Clean</Badge>}</td>
                   <td className="c-tokens num muted">{t.metrics.tokens ?? "—"}</td>
@@ -39,7 +52,18 @@ export function TestsTable({ tests }: { tests: TestResult[] }) {
                   <tr><td colSpan={6} style={{ padding: 0 }}>
                     <div className="detail">
                       {t.error && <div className="banner err">{t.error}</div>}
-                      <div><h5>Prompt</h5><div className="resp" style={{ maxHeight: 140 }}>{t.prompt}</div></div>
+                      {t.messages && t.messages.length > 1 ? (
+                        <div>
+                          <h5>Conversation sent to the model {t.metrics.folded_system && <span className="faint">· system prompt folded into the first user turn (no system role in this template)</span>}</h5>
+                          <div className="conv">
+                            {t.messages.map((m, i) => (
+                              <div key={i} className={`msg ${m.role}`}><span className="who">{ROLE[m.role] ?? m.role}</span><div className="txt">{m.content}</div></div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <div><h5>Prompt</h5><div className="resp" style={{ maxHeight: 140 }}>{t.prompt}</div></div>
+                      )}
                       <div><h5>Model response {t.metrics.finish_reason && <span className="faint">· finish: {t.metrics.finish_reason}</span>}</h5><div className="resp">{t.response || "(empty)"}</div></div>
                       <div className="grid2" style={{ alignItems: "start" }}>
                         <div>

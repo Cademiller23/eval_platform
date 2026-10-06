@@ -193,7 +193,7 @@ function LiveView({ run, live }: { run: RunFull; live: Live }) {
             {live.tests.map((t) => (
               <div key={t.id} className={`tile ${t.passed ? "pass" : "fail"}`}>
                 <span className="ic">{t.passed ? "✓" : "✗"}</span>
-                <div><div className="tn">{t.name}</div><div className="td">{t.domain}{t.health?.severe ? " · output issue" : ""}</div></div>
+                <div><div className="tn">{t.name}</div><div className="td">{t.category ?? t.domain}{t.health?.severe ? " · output issue" : ""}</div></div>
               </div>
             ))}
           </div>

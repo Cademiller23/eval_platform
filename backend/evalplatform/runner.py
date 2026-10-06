@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import re
 import statistics
 import time
 from datetime import datetime, timezone
@@ -17,7 +18,9 @@ from .config import get_settings, hf_token
 from .knowledge import bytes_per_param, match_gpu, parse_gpu, roofline_tps
 from .providers import LaunchSpec, get_provider
 from .providers.base import ChatResult, Session, collect
+from .suite import system_prompts
 from .suite.coherence import analyze_text
+from .suite.sampling import SamplingLab
 from .suite.tasks import DOMAINS, GradeCtx, Task, build_haystack, build_suite
 from .suite.text import split_thinking
 
@@ -31,6 +34,8 @@ PHASES = [
     ("coding", "Coding"),
     ("math", "Mathematics"),
     ("general", "General purpose"),
+    ("system", "System prompts"),
+    ("sampling", "Hyperparameters"),
     ("speculative", "Speculative decoding"),
     ("analysis", "Scoring & report"),
 ]
@@ -52,6 +57,24 @@ STRESS = {
 
 class RunCancelled(Exception):
     pass
+
+
+# Chat templates that cannot take a system message (e.g. Gemma 2) reject it with errors like these.
+ROLE_ERROR = re.compile(
+    r"system role|roles? must alternate|(?:only|supports?) (?:supports? )?(?:the )?user and assistant|system (?:messages?|prompts?|instructions?) (?:are |is )?(?:not|n't)"
+    r"|(?:does not|doesn't|do not|don't|cannot|can't) (?:support|accept|allow) (?:a |any )?(?:system|developer)|unsupported role|conversation roles|developer instruction is not enabled"
+    r"|role.{0,20}system.{0,40}(?:not (?:supported|allowed)|invalid)|invalid role|(?:system|developer) (?:role|message)s? (?:is |are )?(?:not|n't) (?:supported|allowed|enabled)",
+    re.I,
+)
+
+
+def fold_system(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Fold the system prompt into the first user turn, the standard workaround for templates without a system role."""
+    sys_parts = [m["content"] for m in messages if m["role"] == "system"]
+    rest = [dict(m) for m in messages if m["role"] != "system"]
+    if sys_parts and rest and rest[0]["role"] == "user":
+        rest[0]["content"] = "\n\n".join(sys_parts) + "\n\n" + rest[0]["content"]
+    return rest
 
 
 def now_iso() -> str:
@@ -125,6 +148,9 @@ class Runner:
         self.perf: dict[str, Any] = {}
         self.behaviour = {"chunks": 0, "multi": 0, "tokens": 0}
         self._last_tps_emit = 0.0
+        self.system_fold = False                 # the chat template has no system role → fold it into the first user turn
+        self.role_info: dict[str, Any] = {"supported": True, "folded": False, "error": None}
+        self.sampling: dict[str, Any] | None = None
 
     @staticmethod
     def _endpoint(opts: dict[str, Any]) -> dict[str, Any] | None:
@@ -143,12 +169,15 @@ class Runner:
         self._emit({"type": "progress", "phase": pid, "done": done, "total": total, "ephemeral": True})
 
     # ------------------------------------------------------------------ chat helper
-    async def chat(self, messages, *, max_tokens: int, temperature: float = 0.0, meta=None, live: bool = False) -> ChatResult:
+    async def chat(self, messages, *, max_tokens: int, temperature: float = 0.0, meta=None, live: bool = False,
+                   extra_params: dict[str, Any] | None = None, apply_stress: bool = True) -> ChatResult:
         assert self.session
         extra = {}
         if self.model.get("chat_template_kwargs"):
             extra["chat_template_kwargs"] = self.model["chat_template_kwargs"]
-        stress = STRESS.get(self.options.get("stress") or "")
+        if extra_params:
+            extra.update(extra_params)
+        stress = STRESS.get(self.options.get("stress") or "") if apply_stress else None
         if stress:
             temperature = stress["temperature"]
             extra.update(stress["extra"])
@@ -201,7 +230,10 @@ class Runner:
                              "Scores are expected to drop — this verifies that the detectors fire.")
         quick = bool(opts.get("quick"))
         suite = build_suite(self.settings.haystack_tokens, max_len, quick)
-        self.log("info", f"Evaluating {model['name']} ({model['hf_repo']}) — {len(suite)} tests{' (quick mode)' if quick else ''}.")
+        if opts.get("system_prompts") is False:
+            suite = [t for t in suite if t.domain != "system"]
+        self.log("info", f"Evaluating {model['name']} ({model['hf_repo']}) — {len(suite)} tests{' (quick mode)' if quick else ''}"
+                         f"{'' if opts.get('hyperparameters') is False else ' plus the hyperparameter sweeps'}.")
 
         try:
             # ---- provision
@@ -229,12 +261,21 @@ class Runner:
                 await self.run_domain(d, by_domain[d])
 
             failed = [t for t in self.tests if t.get("error")]
+            core = [t for t in self.tests if t["domain"] != "system"]
+            if core and len([t for t in core if t.get("error")]) > len(core) * 0.5:
+                first = next(t for t in core if t.get("error"))
+                raise RuntimeError(f"{len([t for t in core if t.get('error')])}/{len(core)} requests failed. First error: {first['error']}")
             if self.tests and len(failed) > len(self.tests) * 0.5:
                 raise RuntimeError(f"{len(failed)}/{len(self.tests)} requests failed. First error: {failed[0]['error']}")
 
+            # engine counters are read *before* the hyperparameter sweeps: sampling at T=2 would distort speculative acceptance rates
+            metrics_after = await self.session.metrics()
+
+            # ---- hyperparameters
+            self.sampling = await self.run_sampling()
+
             # ---- speculative
             self.phase("speculative", "running")
-            metrics_after = await self.session.metrics()
             beh = {
                 "chunks": self.behaviour["chunks"],
                 "multi_token_chunk_ratio": self.behaviour["multi"] / self.behaviour["chunks"] if self.behaviour["chunks"] else 0.0,
@@ -246,8 +287,9 @@ class Runner:
             # ---- analysis
             self.phase("analysis", "running")
             ok_tests = [t for t in self.tests if not t.get("error")]
-            scores, doms, coh = scoring.compute_scores(ok_tests, self.perf)
-            verdict = scoring.verdict(scores, doms, coh, self.perf, model)
+            system_report = system_prompts.summarize(self.tests, self.role_info) if any(t["domain"] == "system" for t in self.tests) else None
+            scores, doms, coh = scoring.compute_scores(ok_tests, self.perf, sampling=self.sampling)
+            verdict = scoring.verdict(scores, doms, coh, self.perf, model, system=system_report, sampling=self.sampling)
             copy_ratios: dict[str, float] = {}
             for d in DOMAINS:
                 vals = [t["copy_ratio"] for t in ok_tests if t["domain"] == d and t.get("copy_ratio") is not None]
@@ -257,7 +299,8 @@ class Runner:
             usage = self.session.run_summary() if self.session else {}
             if usage.get("providers_seen"):
                 info["providers_seen"] = usage["providers_seen"]
-            recs = recommendations.build(model, info, self.perf, spec_report, coh, doms, ok_tests, opts, copy_ratios)
+            recs = recommendations.build(model, info, self.perf, spec_report, coh, doms, ok_tests, opts, copy_ratios,
+                                         system=system_report, sampling=self.sampling)
             report = {
                 "run_id": self.run_id,
                 "generated_at": now_iso(),
@@ -267,12 +310,15 @@ class Runner:
                 "options": _public_options(opts, spec_label, spec_cfg, gpu, max_len),
                 "environment": _public_env(info, spec),
                 "scores": scores,
+                "score_weights": scoring.effective_weights(scores),
                 "verdict": verdict,
                 "domains": doms,
                 "performance": self.perf,
                 "coherency": coh,
                 "speculative": spec_report,
                 "tests": self.tests,
+                "system_prompts": system_report,
+                "sampling": self.sampling,
                 "recommendations": recs,
                 "usage": usage,
             }
@@ -412,19 +458,67 @@ class Runner:
         self.phase(domain, "done", f"{passed}/{len(tasks)} passed")
         self.log("info", f"{title}: {passed}/{len(tasks)} passed.")
 
+    async def run_sampling(self) -> dict[str, Any] | None:
+        """The hyperparameter suite (see suite/sampling.py): sweeps decoding settings and checks the endpoint honours them."""
+        if self.options.get("hyperparameters") is False:
+            self.phase("sampling", "skipped", "turned off")
+            return None
+        if self.options.get("stress"):
+            self.phase("sampling", "skipped", "the detector self-check overrides decoding settings")
+            return None
+        assert self.session
+        cap = getattr(self.session, "max_concurrency", None) or 99
+        conc = max(1, min(self.settings.suite_concurrency * 2, cap))
+        self.phase("sampling", "running", "temperature · top-p/top-k · penalties · seeds")
+        self.log("info", "Hyperparameter sweeps: temperature curve, truncation, penalties, seeds, stop/max_tokens, then a held-out A/B of the tuned settings.")
+
+        async def ask(messages, *, max_tokens, temperature, extra=None):
+            return await self.chat(messages, max_tokens=max_tokens, temperature=temperature, meta={"sampling": True}, extra_params=extra, apply_stress=False)
+
+        def progress(done: int, total: int) -> None:
+            self.progress("sampling", done, total)
+
+        lab = SamplingLab(ask, model=self.model, quick=bool(self.options.get("quick")), concurrency=conc, progress=progress, log=self.log)
+        try:
+            report = await lab.run()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 - a failed side-suite must never sink the whole evaluation
+            self.log("warn", f"Hyperparameter suite failed: {type(e).__name__}: {e}")
+            self.phase("sampling", "error", f"{type(e).__name__}: {e}"[:160])
+            return {"status": "failed", "error": f"{type(e).__name__}: {e}"}
+        sc = report["score"]["overall"]
+        bad = [c for c in report["controls"] if c["status"] in ("ignored", "rejected")]
+        self.phase("sampling", "done", f"{sc:.0f}/100 · {len(report['controls']) - len(bad)}/{len(report['controls'])} parameters honoured")
+        self.log("info", f"Hyperparameters: score {sc:.0f}/100, safe temperature ceiling {report['temperature']['cliff_t']:g}, {report['requests']} requests.")
+        return report
+
     async def run_task(self, task: Task) -> dict[str, Any]:
         prompt_chars = sum(len(m["content"]) for m in task.messages)
         temp = task.temperature if task.temperature else float(self.options.get("temperature") or 0.0)
         max_tokens = self._max_tokens(task, prompt_chars)
         results: list[ChatResult] = []
+        folded = False
         for run in range(task.runs):
-            r = await self.chat(task.messages, max_tokens=max_tokens, temperature=temp, meta={"task": task, "seed": f"r{run}"})
+            messages = task.messages
+            if task.domain == "system" and self.system_fold:
+                messages, folded = fold_system(task.messages), True
+            r = await self.chat(messages, max_tokens=max_tokens, temperature=temp, meta={"task": task, "seed": f"r{run}"})
+            if (r.error and task.domain == "system" and not self.system_fold and any(m["role"] == "system" for m in task.messages) and ROLE_ERROR.search(r.error)):
+                # the chat template has no system role: remember it, fold the prompt into the first user turn and retry
+                self.system_fold = True
+                self.role_info = {"supported": False, "folded": True, "error": r.error[:200]}
+                self.log("warn", f"The chat template rejected the system role ({r.error[:120]}). Folding system prompts into the first user message for the rest of the run.")
+                messages, folded = fold_system(task.messages), True
+                r = await self.chat(messages, max_tokens=max_tokens, temperature=temp, meta={"task": task, "seed": f"r{run}"})
             results.append(r)
             if r.error:
                 break
         first = results[0]
-        base = {"id": task.id, "domain": task.domain, "name": task.name, "difficulty": task.difficulty, "skill": task.skill,
+        base = {"id": task.id, "domain": task.domain, "name": task.name, "difficulty": task.difficulty, "skill": task.skill, "category": task.category or None,
                 "prompt": _truncate(task.messages[-1]["content"], 1500)}
+        if task.domain == "system":
+            base["messages"] = [{"role": m["role"], "content": _truncate(m["content"], 2500)} for m in task.messages]
         if any(r.error for r in results):
             err = next(r.error for r in results if r.error)
             return {**base, "passed": False, "score": 0.0, "checks": [], "response": "", "error": err, "health": None, "metrics": {}}
@@ -433,7 +527,7 @@ class Runner:
         health = analyze_text(
             text, kind=task.text_kind, allow_repetition=task.allow_repetition, multilingual=task.multilingual,
             finish_reason=results[-1].finish_reason, expect_short=task.expect_short, logprobs=results[-1].logprobs, temperature=temp,
-        )
+        ) if task.health else None
         ctx = GradeCtx(finish_reason=results[-1].finish_reason, completion_tokens=results[-1].completion_tokens, all_texts=[r.text for r in results])
         graded = task.grader(text, ctx)
         if inspect.isawaitable(graded):
@@ -447,7 +541,7 @@ class Runner:
             "checks": [c.as_dict() for c in graded.checks],
             "response": _truncate(text, 6000),
             "thinking_chars": len(thinking),
-            "health": health.as_dict(),
+            "health": health.as_dict() if health is not None else None,
             "copy_ratio": round(copy, 3) if copy is not None else None,
             "metrics": {
                 "ttft_ms": round(r.ttft_s * 1000, 1) if r.ttft_s is not None else None,
@@ -456,6 +550,7 @@ class Runner:
                 "prompt_tokens": r.prompt_tokens,
                 "duration_ms": round(r.total_s * 1000, 1),
                 "finish_reason": r.finish_reason,
+                **({"folded_system": True} if folded else {}),
             },
         }
 
@@ -471,6 +566,7 @@ def _public_options(opts, spec_label, spec_cfg, gpu, max_len) -> dict[str, Any]:
         "quick": bool(opts.get("quick")), "max_model_len": max_len, "temperature": opts.get("temperature") or 0.0,
         "parent_run_id": opts.get("parent_run_id"), "stress": opts.get("stress") or None,
         "openrouter_model": opts.get("openrouter_model"),
+        "system_prompts": opts.get("system_prompts") is not False, "hyperparameters": opts.get("hyperparameters") is not False,
         "endpoint": ({"base_url": opts["endpoint"].get("base_url"), "model": opts["endpoint"].get("model")} if opts.get("endpoint") else None),
     }
 

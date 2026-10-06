@@ -11,8 +11,10 @@ const FEATURES: { icon: IconName; from: string; to: string; title: string; text:
   { icon: "code", from: "#4facfe", to: "#0a64e0", title: "Coding", text: "The model writes real Python, which runs against hidden unit tests in a sandbox: LRU caches, interval merging, bug-fixing and more." },
   { icon: "calc", from: "#b48dff", to: "#6a3de8", title: "Mathematics", text: "Word problems, algebra, combinatorics, number theory and probability, graded on the exact final answer." },
   { icon: "chat", from: "#ffd75e", to: "#f59e0b", title: "General purpose", text: "Instruction following, strict JSON, constraints, knowledge, reasoning, summarising and translation." },
+  { icon: "prompt", from: "#ff9a62", to: "#e0501b", title: "System prompts", text: "Does it obey its instructions? Format rules, multi-turn persistence, who wins a conflict, prompt-injection and secret-leak resistance, scope, and how many rules it can follow at once." },
+  { icon: "tune", from: "#7aa2ff", to: "#3d4fd8", title: "Hyperparameter tuning", text: "Sweeps temperature, top-p, top-k and penalties to find where quality breaks, checks that seeds and stop settings are honoured, and proves the tuned settings on held-out problems." },
   { icon: "bolt", from: "#5ee7ff", to: "#0a8fb0", title: "Speed & speculation", text: "Decode tokens per second, time to first token, concurrency, hardware efficiency, and whether speculative decoding is really running." },
-  { icon: "spark", from: "#ff8cc6", to: "#d6246e", title: "A plan to improve it", text: "Model-specific steps to add speculative decoding, run faster and answer more coherently, each tied to evidence from your run." },
+  { icon: "spark", from: "#ff8cc6", to: "#d6246e", title: "A plan to improve it", text: "Model-specific steps to add speculative decoding, run faster, answer more coherently, harden the system prompt and set the right sampling parameters, each tied to evidence from your run." },
 ];
 
 const KEY_STORE = "coherence-lab.openrouter-key";
@@ -35,6 +37,8 @@ export function Home() {
   const [spec, setSpec] = useState("auto");
   const [specJson, setSpecJson] = useState('{"method": "ngram", "num_speculative_tokens": 5, "prompt_lookup_max": 4}');
   const [quick, setQuick] = useState(false);
+  const [sysOn, setSysOn] = useState(true);
+  const [hypOn, setHypOn] = useState(true);
   const [multi, setMulti] = useState(false);
   const [stress, setStress] = useState<"" | "garble" | "loop">("");
   const [ep, setEp] = useState({ base_url: "http://localhost:8000/v1", api_key: "", model: "" });
@@ -80,6 +84,8 @@ export function Home() {
     if (!isOR && spec === "custom") opts.speculative_custom = specJson;
     if (provider === "openai") opts.endpoint = { base_url: ep.base_url, api_key: ep.api_key || undefined, model: ep.model || undefined };
     if (stress) opts.stress = stress;
+    if (!sysOn) opts.system_prompts = false;
+    if (!hypOn || stress) opts.hyperparameters = false;
     return opts;
   };
 
@@ -110,18 +116,26 @@ export function Home() {
     PROVIDER_SHORT[provider] ?? "…",
     ...(isOR ? [] : [gpu || "recommended GPU", cfg?.speculative_modes.find((m) => m.id === spec)?.label ?? spec]),
     quick ? "quick suite" : "full suite",
+    ...(sysOn ? [] : ["no system prompts"]),
+    ...(hypOn && !stress ? [] : ["no hyperparameters"]),
     ...(multi ? ["compare"] : []),
     ...(stress ? [`self-check: ${stress}`] : []),
   ].join(" · ");
 
-  const eta = isOR ? "about 1 to 4 minutes" : provider === "mock" ? "under a minute" : quick ? "about 3 to 8 minutes" : "about 5 to 15 minutes";
+  const eta = isOR ? (quick ? "about 2 to 5 minutes" : "about 5 to 12 minutes") : provider === "mock" ? "under a minute" : quick ? "about 4 to 10 minutes" : "about 10 to 25 minutes";
+  const sz = cfg?.suite;
+  const nQuick = (sz?.quick ?? 0) + (sysOn ? sz?.system_quick ?? 0 : 0);
+  const nFull = (sz?.full ?? 0) + (sysOn ? sz?.system_full ?? 0 : 0);
+  const sweepReqs = quick ? sz?.sampling_quick : sz?.sampling_full;
+  // roughly how many requests the run sends: matters on paid APIs
+  const requests = sz ? (quick ? sz.quick : sz.full) + (sysOn ? (quick ? sz.system_quick : sz.system_full) ?? 0 : 0) + (hypOn && !stress ? sweepReqs ?? 0 : 0) + (sz.overhead ?? 0) : null;
 
   return (
     <>
       <section className="hero">
         <div className="eyebrow">Model evaluation</div>
         <h1>Is your model <span className="gradient-text">ready to ship?</span></h1>
-        <p className="lead">Pick a model. Coherence Lab starts it, tests how coherent it stays across coding, maths and everyday tasks, measures how fast it decodes, and spots speculative decoding. You get a scorecard and the exact steps to make it faster and better.</p>
+        <p className="lead">Pick a model. Coherence Lab starts it, tests how coherent it stays across coding, maths and everyday tasks, checks that it obeys its system prompt, finds the sampling settings that suit it, measures how fast it decodes, and spots speculative decoding. You get a scorecard and the exact steps to make it faster and better.</p>
 
         <Picker
           entries={entries}
@@ -136,7 +150,7 @@ export function Home() {
           placeholder={isOR ? "Choose an OpenRouter model to evaluate" : "Choose a model to evaluate"}
           footer={isOR ? "Choosing a model starts the evaluation through OpenRouter" : undefined}
         />
-        <div className="hint-line">{multi ? "Compare mode: tick up to 4 models, then start them together" : "Choosing a model starts the evaluation straight away"} · {IS_DEMO ? "a recorded run plays back in about half a minute" : eta}{isOR ? " · cost depends on the model (prices are in the list)" : ""}</div>
+        <div className="hint-line">{multi ? "Compare mode: tick up to 4 models, then start them together" : "Choosing a model starts the evaluation straight away"} · {IS_DEMO ? "a recorded run plays back in about half a minute" : eta}{isOR ? ` · cost depends on the model (prices are in the list)${requests ? `, about ${Math.round(requests / 10) * 10} requests per run` : ""}` : ""}</div>
 
         <div className="opts">
           <button className="opts-toggle" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
@@ -239,8 +253,22 @@ export function Home() {
                 <div className="sheet-title">Evaluation</div>
                 <div className="group">
                   <div className="cell">
-                    <div className="text"><div className="label">Quick mode</div><div className="hint">{IS_DEMO ? "Every recording in the preview is a full run." : `${cfg.suite.quick} representative tests instead of ${cfg.suite.full}. Same pipeline, faster result.`}</div></div>
+                    <div className="text"><div className="label">Quick mode</div><div className="hint">{IS_DEMO ? "Every recording in the preview is a full run." : `${nQuick} representative tests instead of ${nFull}, and lighter hyperparameter sweeps. Same pipeline, faster result.`}</div></div>
                     <div className="ctrl"><Switch on={quick} onChange={setQuick} label="Quick mode" disabled={IS_DEMO} /></div>
+                  </div>
+                  <div className="cell">
+                    <div className="text">
+                      <div className="label">System-prompt suite</div>
+                      <div className="hint">{IS_DEMO ? "Included in every recording in the preview." : `${quick ? sz?.system_quick : sz?.system_full} tests: format rules, persistence, hierarchy, injection, secret leaks, scope and rule capacity.`}</div>
+                    </div>
+                    <div className="ctrl"><Switch on={sysOn} onChange={setSysOn} label="System-prompt suite" disabled={IS_DEMO} /></div>
+                  </div>
+                  <div className="cell">
+                    <div className="text">
+                      <div className="label">Hyperparameter tuning</div>
+                      <div className="hint">{IS_DEMO ? "Included in every recording in the preview." : stress ? "Skipped while the detector self-check is on, because it overrides the decoding settings." : `About ${sweepReqs ?? "…"} requests: temperature curve, top-p/top-k/penalty sweeps, seeds, stop and max_tokens, then a held-out test of the tuned settings.${provider === "openrouter" ? " Uses more tokens on OpenRouter." : ""}`}</div>
+                    </div>
+                    <div className="ctrl"><Switch on={hypOn && !stress} onChange={setHypOn} label="Hyperparameter tuning" disabled={IS_DEMO || !!stress} /></div>
                   </div>
                   <div className="cell">
                     <div className="text"><div className="label">Compare several models</div><div className="hint">Tick up to 4 models and get a side-by-side leaderboard.</div></div>

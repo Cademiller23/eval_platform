@@ -51,6 +51,8 @@ class RunRequest(BaseModel):
     speculative: Literal["auto", "none", "ngram", "eagle3", "mtp", "draft_model", "custom"] = "auto"
     speculative_custom: str | None = None
     quick: bool = False
+    system_prompts: bool = True          # run the system-prompt suite (adherence, injection, leakage, ...)
+    hyperparameters: bool = True         # run the hyperparameter sweeps (temperature, top-p/k, penalties, seeds, ...)
     max_model_len: int | None = Field(default=None, ge=1024, le=262144)
     dtype: str | None = None
     quantization: str | None = None
@@ -71,6 +73,17 @@ def _safe_key_set() -> bool:
         return bool(orp.api_key())
     except ValueError:
         return False
+
+
+def _suite_sizes() -> dict[str, Any]:
+    from .suite.sampling import plan_for
+
+    full, quick = build_suite(), build_suite(quick=True)
+    core = lambda ts: [t for t in ts if t.domain != "system"]  # noqa: E731
+    sysq = lambda ts: [t for t in ts if t.domain == "system"]  # noqa: E731
+    return {"full": len(core(full)), "quick": len(core(quick)), "system_full": len(sysq(full)), "system_quick": len(sysq(quick)),
+            "sampling_full": plan_for(False, False).requests(3), "sampling_quick": plan_for(False, True).requests(3),
+            "overhead": 17}                       # speed benchmark + warm-up requests (measured against a full mock run)
 
 
 def create_app() -> FastAPI:
@@ -130,7 +143,7 @@ def create_app() -> FastAPI:
                 {"id": "draft_model", "label": "Draft model", "hint": "Small sibling model as the drafter."},
                 {"id": "custom", "label": "Custom JSON", "hint": "Your own --speculative-config."},
             ],
-            "suite": {"full": len(build_suite()), "quick": len(build_suite(quick=True))},
+            "suite": _suite_sizes(),
         }
 
     @app.get("/api/models")

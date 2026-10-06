@@ -21,7 +21,7 @@ export function hashGradient(seed: string): string {
 }
 export const familyColor = (f: string) => (FAMILY_GRADIENTS[f] ? gradient(FAMILY_GRADIENTS[f]) : hashGradient(f));
 
-type IconName = "check" | "x" | "chev" | "chevr" | "search" | "bolt" | "code" | "calc" | "chat" | "shield" | "gauge" | "gear" | "download" | "refresh" | "spark" | "clock" | "cpu" | "trash" | "stop" | "copy" | "arrow" | "flask" | "history" | "layers" | "sun" | "moon" | "key" | "compare" | "alert" | "plus";
+type IconName = "check" | "x" | "chev" | "chevr" | "search" | "bolt" | "code" | "calc" | "chat" | "shield" | "gauge" | "gear" | "download" | "refresh" | "spark" | "clock" | "cpu" | "trash" | "stop" | "copy" | "arrow" | "flask" | "history" | "layers" | "sun" | "moon" | "key" | "compare" | "alert" | "plus" | "tune" | "prompt" | "lock" | "info";
 const PATHS: Record<IconName, ReactNode> = {
   check: <path d="M5 12.5l4.5 4.5L19 7" />,
   x: <path d="M6 6l12 12M18 6L6 18" />,
@@ -53,6 +53,10 @@ const PATHS: Record<IconName, ReactNode> = {
   key: <><circle cx="8" cy="15" r="4" /><path d="M10.8 12.2L20 3m-4 4l3 3m-6-0l2 2" /></>,
   compare: <path d="M7 4v16M17 4v16M3 8h8M13 16h8M3 12h8M13 12h8" />,
   alert: <><path d="M12 3.5l9.5 16.5h-19L12 3.5z" /><path d="M12 10v4.5M12 17.5v.01" /></>,
+  tune: <><path d="M4 6h8M16 6h4M4 12h2M10 12h10M4 18h10M18 18h2" /><circle cx="14" cy="6" r="2" /><circle cx="8" cy="12" r="2" /><circle cx="16" cy="18" r="2" /></>,
+  prompt: <><rect x="3" y="4.5" width="18" height="15" rx="3.2" /><path d="M7.2 9.8l3 2.3-3 2.3M12.6 14.6h4.2" /></>,
+  lock: <><rect x="5" y="10.5" width="14" height="10" rx="2.6" /><path d="M8 10.5V8a4 4 0 018 0v2.5M12 14.8v2.2" /></>,
+  info: <><circle cx="12" cy="12" r="8.5" /><path d="M12 11v5M12 7.8v.01" /></>,
 };
 export type { IconName };
 export function Icon({ name, size = 18, stroke = 1.75 }: { name: IconName; size?: number; stroke?: number }) {
